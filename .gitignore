@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+dist-ssr/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Python environments
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDEs
+.idea/
+.vscode/
+
+# Local database
+db.sqlite3
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+media/
+staticfiles/
