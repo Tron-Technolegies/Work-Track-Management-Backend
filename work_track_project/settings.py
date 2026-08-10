@@ -36,14 +36,7 @@ DEBUG = os.getenv("DEBUG")
 AUTH_USER_MODEL = "work_track_admin.User"
 
 
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.getenv(
-        "ALLOWED_HOSTS",
-        "localhost,127.0.0.1"
-    ).split(",")
-    if host.strip()
-]
+ALLOWED_HOSTS = ['work-track-management-backend-g5cu.onrender.com','*']
 
 
 # Application definition
