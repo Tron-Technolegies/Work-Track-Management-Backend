@@ -36,7 +36,11 @@ DEBUG = os.getenv("DEBUG")
 AUTH_USER_MODEL = "work_track_admin.User"
 
 
-ALLOWED_HOSTS = ['work-track-management-backend-g5cu.onrender.com','*']
+ALLOWED_HOSTS = [
+    'work-track-management-backend-g5cu.onrender.com',
+    "localhost",
+    "127.0.0.1"
+    ]
 
 
 # Application definition
@@ -89,23 +93,19 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CORS_ALLOWED_ORIGINS",
-        "http://localhost:5173,http://localhost:5174"
-    ).split(",")
-    if origin.strip()
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://worktrackmanagemnet.netlify.app/"
+
 ]
 
 CORS_ALLOW_CREDENTIALS= True
 
 CSRF_TRUSTED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CSRF_TRUSTED_ORIGINS",
-        "http://localhost:5173,http://localhost:5174"
-    ).split(",")
-    if origin.strip()
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://worktrackmanagemnet.netlify.app/"
+
 ]
 
 ROOT_URLCONF = 'work_track_project.urls'
