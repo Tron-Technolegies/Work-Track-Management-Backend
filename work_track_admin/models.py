@@ -10,9 +10,9 @@ from django.conf import settings
 # Create your models here.
 
 class Company(models.Model):
-    company_name = models.CharField(max_length=200)
+    company_name = models.CharField(max_length=200,unique=True)
     company_code = models.CharField(max_length=50,unique=True)
-    email = models.EmailField()
+    email = models.EmailField(unique=True)
     phone = models.CharField(max_length=20)
     address = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -49,8 +49,8 @@ class Company(models.Model):
 
 
 class User(AbstractUser):
-    username = models.EmailField(unique=True)
-    email = models.EmailField(unique=True)
+    username = models.CharField(max_length=255, unique=True)
+    email = models.EmailField()
     ROLE_CHOICES = (
         ("admin", "Admin"),
         ("project_lead", "Project Lead"),
@@ -72,6 +72,13 @@ class User(AbstractUser):
 
     USERNAME_FIELD = "username"
     REQUIRED_FIELDS = ["email"]
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['company', 'email'], name='unique_company_email')
+        ]
+
+
 
 
     def __str__(self):
@@ -621,25 +628,12 @@ from django.db import models
 
 class LeaveType(models.Model):
 
-    LEAVE_TYPE_CHOICES = [
-        ("casual", "Casual Leave"),
-        ("sick", "Sick Leave"),
-        ("earned", "Earned Leave"),
-        ("maternity", "Maternity Leave"),
-        ("paternity", "Paternity Leave"),
-        ("work_from_home", "Work From Home"),
-        ("half_day", "Half Day"),
-        ("comp_off", "Compensatory Off"),
-        ("loss_of_pay", "Loss of Pay"),
-        ("bereavement", "Bereavement Leave"),
-    ]
-
     STATUS_CHOICES = [
         ("active", "Active"),
         ("inactive", "Inactive"),
     ]
     company = models.ForeignKey(Company,on_delete=models.CASCADE,related_name="leave_types")
-    name = models.CharField(max_length=30,choices=LEAVE_TYPE_CHOICES)
+    name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
     days_per_year = models.PositiveIntegerField(default=0)
     is_paid = models.BooleanField(default=True)
@@ -659,7 +653,7 @@ class LeaveType(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.get_name_display()} - {self.company.company_name}"
+        return f"{self.name} - {self.company.company_name}"
 
 
 
@@ -874,4 +868,4 @@ class AttendanceCorrection(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"{self.user.email} - {self.work_date} ({self.status})"
+        return f"{self.user.email} - {self.work_date} ({self.status})"

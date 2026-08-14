@@ -34,7 +34,13 @@ class UserSerializer(serializers.ModelSerializer):
         ]
 
         extra_kwargs = {
-            "password": {"write_only": True}
+            "password": {"write_only": True, "required": False},
+            "username": {"required": False},
+            "team": {"required": False, "allow_null": True},
+            "mobile": {"required": False, "allow_blank": True, "allow_null": True},
+            "profile_picture": {"required": False, "allow_null": True},
+            "first_name": {"required": False, "allow_blank": True},
+            "last_name": {"required": False, "allow_blank": True},
         }
 
     def to_representation(self, instance):
@@ -50,15 +56,74 @@ class TaskSerializer(serializers.ModelSerializer):
         exclude = ["company"]
 
     def to_representation(self, instance):
+        from django.utils import timezone
+
         representation = super().to_representation(instance)
-        representation["assigned_by"] = (instance.assigned_by.first_name if instance.assigned_by else None)
-        representation['assigned_to'] = UserSerializer(instance.assigned_to.all(), many=True).data
-        representation["team"] = TeamSerializer(instance.team).data if instance.team else None
+
+        # Assigned By
+        representation["assigned_by"] = (
+            instance.assigned_by.first_name
+            or instance.assigned_by.username
+            if instance.assigned_by
+            else None
+        )
+
+        # Assigned Users
+        representation["assigned_to"] = UserSerializer(
+            instance.assigned_to.all(),
+            many=True
+        ).data
+
+        # Team
+        representation["team"] = (
+            TeamSerializer(instance.team).data
+            if instance.team
+            else None
+        )
+
+        # Project Name
+        representation["project_name"] = (
+            instance.project.project_name
+            if instance.project
+            else None
+        )
+
+        # Actual Task Time
+        task_times = TaskTime.objects.filter(task=instance)
+
+        total_seconds = 0
+
+        for tt in task_times:
+
+            if tt.duration:
+                total_seconds += tt.duration.total_seconds()
+
+            elif tt.start_time and tt.end_time:
+                total_seconds += (
+                    tt.end_time - tt.start_time
+                ).total_seconds()
+
+            elif tt.start_time and not tt.end_time:
+                total_seconds += (
+                    timezone.now() - tt.start_time
+                ).total_seconds()
+
+        hours = int(total_seconds // 3600)
+        minutes = int((total_seconds % 3600) // 60)
+
+        representation["time_spent"] = (
+            f"{hours:02d}h {minutes:02d}m"
+        )
+
+        representation["total_seconds_spent"] = int(total_seconds)
+
         return representation
 
 class ProjectSerializer(serializers.ModelSerializer):
     progress = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
+    attachment_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Project
         exclude = ["company"]
@@ -73,18 +138,16 @@ class ProjectSerializer(serializers.ModelSerializer):
             status="Completed"
         ).count()
 
-        return round(
-            (completed_tasks / total_tasks) * 100
-        )
-    
+        return round((completed_tasks / total_tasks) * 100)
+
     def get_status(self, instance):
         total_tasks = instance.tasks.count()
 
         if total_tasks == 0:
             return "Pending"
-        
+
         completed_tasks = instance.tasks.filter(
-            status = "Completed"
+            status="Completed"
         ).count()
 
         in_progress_tasks = instance.tasks.filter(
@@ -99,37 +162,39 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         return "Pending"
 
+    def get_attachment_url(self, instance):
+        if not instance.attachments:
+            return None
+
+        request = self.context.get("request")
+
+        if request:
+            return request.build_absolute_uri(
+                instance.attachments.url
+            )
+
+        return instance.attachments.url
+
     def to_representation(self, instance):
         representation = super().to_representation(instance)
 
-        representation['assigned_to'] = UserSerializer(
+        representation["assigned_to"] = UserSerializer(
             instance.assigned_to.all(),
             many=True
         ).data
 
-        representation['tasks'] = TaskSerializer(
+        representation["tasks"] = TaskSerializer(
             instance.tasks.all(),
             many=True
         ).data
 
-        representation["team"] = TeamSerializer(
-            instance.team
-        ).data if instance.team else None
+        representation["team"] = (
+            TeamSerializer(instance.team).data
+            if instance.team
+            else None
+        )
+
         return representation
-    def get_total_time(self, obj):
-            
-        if not obj.start_time or not obj.end_time:
-            
-            return None
-
-        duration = obj.end_time - obj.start_time
-
-        total_seconds = int(duration.total_seconds())
-
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-
-        return f"{hours}h {minutes}m"
 
 class TaskTimeSerializer(serializers.ModelSerializer):
     user_details = UserSerializer(source='user', read_only=True)
@@ -274,9 +339,12 @@ class LeaveTypeSerializer(serializers.ModelSerializer):
             "days_per_year",
             "is_paid",
             "is_active",
+            "allow_half_day",
+            "status",
             "created_at",
+            "updated_at",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
 
 from rest_framework import serializers
 from .models import LeaveRequest
@@ -441,4 +509,4 @@ class CompanySerializer(serializers.ModelSerializer):
 class SecuritySettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = SecuritySettings
-        exclude = ["company", "created_at", "updated_at"]
+        exclude = ["company", "created_at", "updated_at"]

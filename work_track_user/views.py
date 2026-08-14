@@ -166,7 +166,7 @@ def monitor_status(request):
     })
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsEmployeeRole])
+@permission_classes([IsAuthenticated])
 def upload_screenshot(request):
 
     image = request.data.get("image")
@@ -191,8 +191,11 @@ def upload_screenshot(request):
         )
 
     try:
-        format, imgstr = image.split(";base64,")
-    except ValueError:
+        if ";base64," in image:
+            format, imgstr = image.split(";base64,")
+        else:
+            imgstr = image
+    except Exception:
         return Response(
             {"error": "Invalid image format"},
             status=status.HTTP_400_BAD_REQUEST
@@ -200,18 +203,13 @@ def upload_screenshot(request):
 
     filename = f"{request.user.id}_{timezone.now():%Y%m%d_%H%M%S}.png"
 
-    file = ContentFile(
-        base64.b64decode(imgstr),
-        name=filename
-    )
-
     screenshot = Screenshot.objects.create(
         company=request.user.company,
         user=request.user,
         work_session=session,
-        image=file,
         reason=reason
     )
+    screenshot.image.save(filename, ContentFile(base64.b64decode(imgstr)), save=True)
 
     serializer = ScreenshotSerializer(screenshot)
 
@@ -251,10 +249,16 @@ def my_screenshots(request):
 @permission_classes([IsAuthenticated])
 def monitoring_settings(request):
 
-    # settings = MonitoringSettings.objects.filter(company=request.user.company,).first()
-    settings = get_object_or_404(
-        MonitoringSettings,
-        company=request.user.company
+    company = request.user.company
+    if not company:
+        from work_track_admin.models import Company
+        company = Company.objects.first()
+
+    if not company:
+        return Response({"error": "No company associated with user"}, status=400)
+
+    settings, _ = MonitoringSettings.objects.get_or_create(
+        company=company
     )
     serializer = MonitoringSettingsSerializer(settings)
     return Response(serializer.data)

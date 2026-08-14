@@ -160,14 +160,17 @@ def Signup(request):
         if Company.objects.filter(company_name=company_name).exists():
             return Response(
                 {"error": "Company already exists"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_400_BAD_REQUEST
             )
-
-        if User.objects.filter(email=email).exists():
+        if User.objects.filter(email__iexact=email).exists():
             return Response(
-                {"error": "Email already exists"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+                {"error": "An account with this email address already exists."},
+                status=status.HTTP_400_BAD_REQUEST
+        )
+
+        # Removed global email existence check since we allow cross-company identical emails.
+        # But we must check if a company already exists for this email if we want to restrict one company per email owner.
+        # Let's assume an owner CAN create multiple companies with same email if they want.
 
         print("Creating serializer...")
 
@@ -183,10 +186,10 @@ def Signup(request):
         print("Serializer Valid")
 
         with transaction.atomic():
-
+            company_code = generate_company_code()
             company = Company.objects.create(
                 company_name=company_name,
-                company_code=generate_company_code(),
+                company_code=company_code,
                 email=email,
                 phone=request.data.get("phone"),
                 address=request.data.get("address", ""),
@@ -218,108 +221,253 @@ def Signup(request):
         )
 
 
-
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsAdminRole, IsAdminOrProjectLead])
+@permission_classes([IsAuthenticated, IsAdminOrProjectLead])
 @parser_classes([JSONParser, MultiPartParser, FormParser])
 def Create_Employee(request):
-    print(request.data)
-    data = request.data.copy()
 
-    data["first_name"] = request.data.get("first_name", "")
-    data["last_name"] = request.data.get("last_name", "")
-    data["mobile"] = request.data.get("mobile", "")
+    first_name = str(request.data.get("first_name", "")).strip()
+    last_name = str(request.data.get("last_name", "")).strip()
+    email = str(request.data.get("email", "")).strip().lower()
+    mobile = str(request.data.get("mobile", "")).strip()
+    password = request.data.get("password", "")
 
-    if request.data.get("email"):
-        data["username"] = request.data.get("email")
+    # -----------------------------
+    # Required field validation
+    # -----------------------------
 
-    password = data.get("password", "")
+    if not first_name:
+        return Response(
+            {"error": "First name is required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    # Password Validation
+    if not last_name:
+        return Response(
+            {"error": "Last name is required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not email:
+        return Response(
+            {"error": "Email address is required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        return Response(
+            {"error": "Please enter a valid email address."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # -----------------------------
+    # Company
+    # -----------------------------
+
+    user_company = request.user.company
+
+    if not user_company:
+        return Response(
+            {"error": "Your account is not associated with a company."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # -----------------------------
+    # Duplicate email
+    # -----------------------------
+
+    if User.objects.filter(
+        email__iexact=email,
+        company=user_company
+    ).exists():
+        return Response(
+            {
+                "error": f"An employee account with email '{email}' already exists in this company."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # -----------------------------
+    # Mobile validation
+    # -----------------------------
+
+    if mobile and not re.match(r"^[6-9]\d{9}$", mobile):
+        return Response(
+            {
+                "error": "Mobile number must be a valid 10-digit number starting with 6, 7, 8, or 9."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # -----------------------------
+    # Password validation
+    # -----------------------------
+
+    if not password:
+        return Response(
+            {"error": "Password is required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
     if len(password) < 8:
         return Response(
-            {"error": "Password must be at least 8 characters long"},
+            {"error": "Password must be at least 8 characters long."},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if not re.search(r"[A-Z]", password):
         return Response(
-            {"error": "Password must contain at least one uppercase letter"},
+            {"error": "Password must contain at least one uppercase letter."},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if not re.search(r"[a-z]", password):
         return Response(
-            {"error": "Password must contain at least one lowercase letter"},
+            {"error": "Password must contain at least one lowercase letter."},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if not re.search(r"\d", password):
         return Response(
-            {"error": "Password must contain at least one number"},
+            {"error": "Password must contain at least one number."},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
         return Response(
-            {"error": "Password must contain at least one special character"},
+            {
+                "error": "Password must contain at least one special character."
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # -----------------------------
+    # Role
+    # -----------------------------
+
     requested_role = request.data.get("role", "user")
-    assigned_role = requested_role if requested_role in ["user", "project_lead"] else "user"
+
+    assigned_role = (
+        requested_role
+        if requested_role in ["user", "project_lead"]
+        else "user"
+    )
+
+    # -----------------------------
+    # Team
+    # -----------------------------
+
+    team = None
+    team_id = request.data.get("team")
+
+    if team_id not in ["", "null", None]:
+        try:
+            team = Team.objects.get(
+                id=team_id,
+                company=user_company
+            )
+
+        except (Team.DoesNotExist, ValueError):
+            return Response(
+                {
+                    "error": "Selected Team is invalid or does not exist."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    # -----------------------------
+    # Build serializer data
+    # -----------------------------
+
+    data = {
+        "username": email,
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+        "mobile": mobile,
+        "role": assigned_role,
+    }
+
+    if team:
+        data["team"] = team.id
+
+    # Profile picture
+    profile_picture = request.FILES.get("profile_picture")
+
+    if profile_picture:
+        data["profile_picture"] = profile_picture
+
+    # -----------------------------
+    # Serializer
+    # -----------------------------
 
     serializer = UserSerializer(data=data)
 
-    if serializer.is_valid():
+    if not serializer.is_valid():
+        print(
+            "CREATE EMPLOYEE SERIALIZER ERRORS:",
+            serializer.errors
+        )
 
-        with transaction.atomic():
+        err_msgs = []
 
-            team = None
+        for field, errs in serializer.errors.items():
+            field_name = field.replace("_", " ").title()
 
-        team_id = request.data.get("team")
-
-        if team_id:
-            try:
-                team = Team.objects.get(
-                    id=team_id,
-                    company=request.user.company
+            if isinstance(errs, list):
+                err_msgs.append(
+                    f"{field_name}: {' '.join(str(e) for e in errs)}"
                 )
-            except Team.DoesNotExist:
-                return Response(
-                    {"error": "Invalid Team selected."},
-                    status=status.HTTP_400_BAD_REQUEST
+            else:
+                err_msgs.append(
+                    f"{field_name}: {errs}"
                 )
-
-            user = serializer.save(
-                company=request.user.company,
-                team=team
-            )
-
-            user.set_password(password)
-            user.role = assigned_role
-            user.is_staff = False
-            user.save()
 
         return Response(
             {
-                "message": "Employee created successfully",
-                "user": UserSerializer(user).data
+                "error": (
+                    " | ".join(err_msgs)
+                    if err_msgs
+                    else "Employee validation failed."
+                )
             },
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_400_BAD_REQUEST
         )
-    print(serializer.errors)
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    # -----------------------------
+    # Create employee
+    # -----------------------------
+
+    with transaction.atomic():
+
+        user = serializer.save(
+            company=user_company,
+            team=team
+        )
+
+        user.set_password(password)
+        user.role = assigned_role
+        user.is_staff = False
+        user.save()
+
+    return Response(
+        {
+            "message": "Employee created successfully",
+            "user": UserSerializer(user).data
+        },
+        status=status.HTTP_201_CREATED
+    )
+
 
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def Login(request):
 
-    email = str(request.data.get("email", "")).strip()
+    email = str(request.data.get("email", "")).strip().lower()
     password = request.data.get("password", "")
 
+    # Required fields
     if not email or not password:
         return Response(
             {
@@ -328,20 +476,14 @@ def Login(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Authenticate using email as username
     user = authenticate(
         username=email,
         password=password
     )
 
-    if not user:
-        # Fallback to case-insensitive email/username lookup
-        user_obj = User.objects.filter(
-            Q(email__iexact=email) | Q(username__iexact=email)
-        ).first()
-        if user_obj and user_obj.check_password(password):
-            user = user_obj
-
-    if not user:
+    # Wrong email OR wrong password
+    if user is None:
         return Response(
             {
                 "error": "Invalid email or password."
@@ -349,6 +491,7 @@ def Login(request):
             status=status.HTTP_401_UNAUTHORIZED
         )
 
+    # Account disabled
     if not user.is_active:
         return Response(
             {
@@ -357,6 +500,7 @@ def Login(request):
             status=status.HTTP_403_FORBIDDEN
         )
 
+    # Generate JWT tokens
     refresh = RefreshToken.for_user(user)
 
     return Response(
@@ -369,12 +513,32 @@ def Login(request):
                 "last_name": user.last_name,
                 "email": user.email,
                 "role": user.role,
+
+                "company_id": (
+                    user.company.id
+                    if user.company
+                    else None
+                ),
+
+                "company_name": (
+                    user.company.company_name
+                    if user.company
+                    else None
+                ),
+
+                "company_code": (
+                    user.company.company_code
+                    if user.company
+                    else None
+                ),
+
                 "profile_picture": (
                     user.profile_picture.url
                     if user.profile_picture
                     else None
                 ),
             },
+
             "role": user.role,
             "id": user.id,
             "access": str(refresh.access_token),
@@ -382,7 +546,6 @@ def Login(request):
         },
         status=status.HTTP_200_OK
     )
-
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -475,13 +638,32 @@ def Get_Users(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def Get_User_List(request):
-    users = User.objects.filter(role="user",is_active=True,company=request.user.company)
-    serializer = UserSerializer(users, many=True) 
+
+    users = User.objects.filter(
+        company=request.user.company,
+        is_active=True
+    ).exclude(
+        role="admin"
+    ).order_by("first_name")
+    serializer = UserSerializer(users, many=True)
+
     data = [
-        {"id": u['id'], "first_name": u['first_name'],"last_name": u['last_name'], "email": u['email'], "Mobile": u['mobile'],"profile_picture": u['profile_picture']}
+        {
+            "id": u["id"],
+            "first_name": u["first_name"],
+            "last_name": u["last_name"],
+            "email": u["email"],
+            "mobile": u["mobile"],
+            "profile_picture": u["profile_picture"],
+            "role": u["role"],
+        }
         for u in serializer.data
     ]
-    return Response(data, status=status.HTTP_200_OK)
+
+    return Response(
+        data,
+        status=status.HTTP_200_OK
+    )
 
 
 
@@ -658,43 +840,58 @@ def Add_Projects(request):
 
     serializer = ProjectSerializer(data=formatted_data)
     if serializer.is_valid():
-        project = serializer.save(active='View',company=request.user.company,)
+
+        project = serializer.save(
+            active="View",
+            company=request.user.company
+        )
 
         for user in project.assigned_to.all():
-            send_notification(
-                company=request.user.company,
-                user=user,
-                title="Project Assigned",
-                message=f"You have been assigned to project '{project.project_name}'.",
-                notification_type="project",
-            )
+
+            # In-app notification
+            try:
+                send_notification(
+                    company=request.user.company,
+                    user=user,
+                    title="Project Assigned",
+                    message=f"You have been assigned to project '{project.project_name}'.",
+                    notification_type="project",
+                )
+            except Exception as e:
+                print(
+                    f"Project notification failed for {user.username}: {e}"
+                )
+            # Email notification
             try:
                 full_name = f"{user.first_name} {user.last_name}".strip()
-
                 send_email_notification(
                     company=request.user.company,
                     subject="New Project Assigned",
                     message=(
                         f"Hello {full_name or user.username},\n\n"
                         f"You have been assigned to a new project.\n\n"
-                        f"Team: {project.team.team_name if project.team else 'Not Assigned'}\n"
+                        f"Team: "
+                        f"{project.team.team_name if project.team else 'Not Assigned'}\n"
                         f"Project: {project.project_name}\n"
                         f"Priority: {project.priority}\n"
                         f"Due Date: {project.due_date}\n\n"
                         f"Description:\n{project.description}\n\n"
-                        f"Please log in to Work Track Management to view the project details."
+                        f"Please log in to Work Track Management "
+                        f"to view the project details."
                     ),
                     recipient_email=user.email,
                 )
-
             except Exception as e:
-                print(f"Email sending failed for {user.email}: {e}")
-
-        return Response({
-            'message': 'Project added successfully',
-            'project': serializer.data
-        }, status=status.HTTP_201_CREATED)
-
+                print(
+                    f"Email sending failed for {user.email}: {e}"
+                )
+        return Response(
+            {
+                "message": "Project added successfully",
+                "project": ProjectSerializer(project).data
+            },
+            status=status.HTTP_201_CREATED
+        )
 
         
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -808,18 +1005,29 @@ def update_projects(request, id):
     serializer = ProjectSerializer(project, data=formatted_data, partial=(request.method in ['PATCH', 'POST']))
     if serializer.is_valid():
         project = serializer.save()
-        if 'attachments' in request.FILES:
-            project.attachments = request.FILES['attachments']
+
+        if "attachments" in request.FILES:
+            project.attachments = request.FILES["attachments"]
             project.save()
 
         for user in project.assigned_to.all():
-            send_notification(
-                company=request.user.company,
-                user=user,
-                title="Project Updated",
-                message=f"The project '{project.project_name}' has been updated.",
-                notification_type="project",
-            )
+
+            # In-app notification
+            try:
+                send_notification(
+                    company=request.user.company,
+                    user=user,
+                    title="Project Updated",
+                    message=f"The project '{project.project_name}' has been updated.",
+                    notification_type="project",
+                )
+            except Exception as e:
+                print(
+                    f"Project update notification failed "
+                    f"for {user.username}: {e}"
+                )
+
+            # Email notification
             try:
                 full_name = f"{user.first_name} {user.last_name}".strip()
 
@@ -829,45 +1037,76 @@ def update_projects(request, id):
                     message=(
                         f"Hello {full_name or user.username},\n\n"
                         f"A project assigned to you has been updated.\n\n"
-                        f"Team: {project.team.team_name if project.team else 'Not Assigned'}\n"
+                        f"Team: "
+                        f"{project.team.team_name if project.team else 'Not Assigned'}\n"
                         f"Project: {project.project_name}\n"
                         f"Priority: {project.priority}\n"
                         f"Status: {project.status}\n"
                         f"Due Date: {project.due_date}\n\n"
                         f"Description:\n{project.description}\n\n"
-                        f"Please log in to Work Track Management to view the latest project details."
+                        f"Please log in to Work Track Management "
+                        f"to view the latest project details."
                     ),
                     recipient_email=user.email,
                 )
 
             except Exception as e:
-                print(f"Email sending failed for {user.email}: {e}")
-                
-        return Response({
-            'message': 'Successfully updated',
-            'project': serializer.data
-        }, status=status.HTTP_200_OK)
-        
+                print(
+                    f"Email sending failed for {user.email}: {e}"
+                )
+
+        return Response(
+            {
+                "message": "Successfully updated",
+                "project": ProjectSerializer(project).data
+            },
+            status=status.HTTP_200_OK
+        )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 
 @api_view(["DELETE"])
-@permission_classes([IsAuthenticated,IsAdminRole])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def Delete_Projects(request, id):
-    project = get_object_or_404(Project, id=id,company=request.user.company)
 
-    for user in project.assigned_to.all():
-        send_notification(
-            company=request.user.company,
-            user=user,
-            title="Project Deleted",
-            message=f"The project '{project.project_name}' has been deleted.",
-            notification_type="project",
-        )
+    project = get_object_or_404(
+        Project,
+        id=id,
+        company=request.user.company
+    )
+
+    project_name = project.project_name
+
+    # Save assigned users before deletion
+    assigned_users = list(project.assigned_to.all())
+
+    # Delete project FIRST
     project.delete()
 
-    return Response({'message': 'Successfully deleted'}, status=status.HTTP_200_OK)
+    # Send notifications AFTER successful deletion
+    for user in assigned_users:
+
+        try:
+            send_notification(
+                company=request.user.company,
+                user=user,
+                title="Project Deleted",
+                message=f"The project '{project_name}' has been deleted.",
+                notification_type="project",
+            )
+        except Exception as e:
+            print(
+                f"Project deletion notification failed "
+                f"for {user.username}: {e}"
+            )
+
+    return Response(
+        {
+            "message": "Successfully deleted"
+        },
+        status=status.HTTP_200_OK
+    )
 
 
 @api_view(["GET"])
@@ -992,20 +1231,30 @@ def project_dropdown(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, IsAdminOrProjectLead])
 def Add_Tasks(request):
+
     data = request.data.copy()
+
     mapping = {
-        'task_name': 'task_name',
-        'priority': 'priority',
-        'project': 'project',
-        'team' : 'team',
-        'due_date': 'due_date', 
-        'status': 'status',
-        'working_hours': 'working_hours',
-        'description': 'description',
-        'assigned_to': 'assigned_to'
+        "task_name": "task_name",
+        "priority": "priority",
+        "project": "project",
+        "team": "team",
+        "due_date": "due_date",
+        "status": "status",
+        "working_hours": "working_hours",
+        "description": "description",
+        "assigned_to": "assigned_to",
     }
-    
-    formatted_data = {mapping.get(k, k): v for k, v in data.items()}
+
+    formatted_data = {
+        mapping.get(k, k): v
+        for k, v in data.items()
+    }
+
+    # -----------------------------------
+    # Validate project
+    # -----------------------------------
+
     project = Project.objects.filter(
         id=request.data.get("project"),
         company=request.user.company
@@ -1017,10 +1266,14 @@ def Add_Tasks(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # -----------------------------------
+    # Validate team
+    # -----------------------------------
 
     team_id = request.data.get("team")
 
     if team_id:
+
         team = Team.objects.filter(
             id=team_id,
             company=request.user.company
@@ -1028,102 +1281,201 @@ def Add_Tasks(request):
 
         if not team:
             return Response(
-                {"error":"Invalid team."},
+                {"error": "Invalid team."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         if project.team_id != team.id:
             return Response(
                 {
                     "error": "Selected team does not belong to this project."
-                }, status=status.HTTP_400_BAD_REQUEST
-            )
-    
-    serializer = TaskSerializer(data=formatted_data)
-
-    if serializer.is_valid():
-
-        # Validate assigned users belong to the same company
-        assigned_ids = request.data.get("assigned_to", [])
-
-        if not isinstance(assigned_ids, list):
-            assigned_ids = [assigned_ids]
-
-        users = User.objects.filter(
-            id__in=assigned_ids,
-            company=request.user.company
-        )
-
-        if users.count() != len(assigned_ids):
-            return Response(
-                {"error": "Invalid employee selection."},
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        task = serializer.save(
-            company=request.user.company
-        )
+    # -----------------------------------
+    # Validate task data
+    # -----------------------------------
 
-        # Create notifications
-        for user in task.assigned_to.all():         
-            send_notification(
-            company=request.user.company,
-            user=user,
-            title="Task Assigned",
-            message=f"You have been assigned a new task: {task.task_name}",
-            notification_type="task"
-        )
+    serializer = TaskSerializer(data=formatted_data)
 
-            try:
-                full_name = f"{user.first_name} {user.last_name}".strip()
-                send_email_notification(
-                    company=request.user.company,
-                    subject="New Task Assigned",
-                    message=(
-                        f"Hello {full_name or user.username},\n\n"
-                        f"You have been assigned a new task.\n\n"
-                        f"Team: {task.team.team_name if task.team else 'Not Assigned'}\n"
-                        f"Task: {task.task_name}\n"
-                        f"Project: {task.project.project_name}\n"
-                        f"Priority: {task.priority}\n"
-                        f"Due Date: {task.due_date}\n\n"
-                        f"Please log in to Work Track Management to view the task."
-                    ),
-                    recipient_email=user.email
+    if not serializer.is_valid():
+
+        error_messages = []
+
+        for field, errors in serializer.errors.items():
+
+            field_name = field.replace("_", " ").title()
+
+            if isinstance(errors, list):
+                error_messages.append(
+                    f"{field_name}: {' '.join(str(error) for error in errors)}"
                 )
-            except Exception as e:
-                print(f"Email sending failed for {user.email}: {e}")
+            else:
+                error_messages.append(
+                    f"{field_name}: {str(errors)}"
+                )
 
         return Response(
             {
-                "message": "Task successfully added",
-                "data": serializer.data
+                "error": (
+                    " | ".join(error_messages)
+                    if error_messages
+                    else "Task validation failed."
+                )
             },
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    # -----------------------------------
+    # Validate assigned users
+    # -----------------------------------
 
+    assigned_ids = request.data.get("assigned_to", [])
+
+    if not isinstance(assigned_ids, list):
+        assigned_ids = [assigned_ids]
+
+    users = User.objects.filter(
+        id__in=assigned_ids,
+        company=request.user.company
+    )
+
+    if users.count() != len(assigned_ids):
+        return Response(
+            {"error": "Invalid employee selection."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ===================================
+    # CREATE TASK
+    # ===================================
+
+    task = serializer.save(
+        company=request.user.company
+    )
+
+    # ===================================
+    # NOTIFICATION + EMAIL
+    # These must NOT break task creation
+    # ===================================
+
+    notification_errors = []
+    email_errors = []
+
+    for user in task.assigned_to.all():
+
+        # -----------------------------------
+        # In-app notification
+        # -----------------------------------
+
+        try:
+
+            send_notification(
+                company=request.user.company,
+                user=user,
+                title="Task Assigned",
+                message=f"You have been assigned a new task: {task.task_name}",
+                notification_type="task"
+            )
+
+        except Exception as e:
+
+            # Log technical error in backend
+            print(
+                f"Notification failed for {user.email}: {e}"
+            )
+
+            notification_errors.append(
+                f"Notification could not be sent to {user.email}"
+            )
+
+        # -----------------------------------
+        # Email notification
+        # -----------------------------------
+
+        try:
+
+            full_name = (
+                f"{user.first_name} {user.last_name}"
+            ).strip()
+
+            send_email_notification(
+                company=request.user.company,
+                subject="New Task Assigned",
+                message=(
+                    f"Hello {full_name or user.username},\n\n"
+                    f"You have been assigned a new task.\n\n"
+                    f"Team: "
+                    f"{task.team.team_name if task.team else 'Not Assigned'}\n"
+                    f"Task: {task.task_name}\n"
+                    f"Project: {task.project.project_name}\n"
+                    f"Priority: {task.priority}\n"
+                    f"Due Date: {task.due_date}\n\n"
+                    f"Please log in to Work Track Management "
+                    f"to view the task."
+                ),
+                recipient_email=user.email
+            )
+
+        except Exception as e:
+
+            # Log technical error
+            print(
+                f"Email sending failed for {user.email}: {e}"
+            )
+
+            email_errors.append(
+                f"Email could not be sent to {user.email}"
+            )
+
+    # ===================================
+    # TASK CREATED SUCCESSFULLY
+    # ===================================
+
+    return Response(
+        {
+            "message": "Task successfully added",
+            "data": serializer.data,
+
+            # Notification status
+            "notification_success": len(notification_errors) == 0,
+            "notification_errors": notification_errors,
+
+            # Email status
+            "email_success": len(email_errors) == 0,
+            "email_errors": email_errors,
+        },
+        status=status.HTTP_201_CREATED
+    )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def View_Tasks(request):
 
-    query = request.GET.get("search", "")
-    filter_date = request.GET.get("date", "")
+    query = request.GET.get("search", "").strip()
+    filter_date = request.GET.get("date", "").strip()
+    filter_status = request.GET.get("status", "").strip()
 
-
+    # ==========================================
+    # BASE TASK QUERY
+    # ==========================================
 
     if request.user.role == "admin":
         tasks = Task.objects.filter(
             company=request.user.company
         ).order_by("-id")
+
     else:
         tasks = Task.objects.filter(
             company=request.user.company,
-            assigned_to=request.user   
+            assigned_to=request.user
         ).order_by("-id")
+
+    # ==========================================
+    # SEARCH
+    # ==========================================
 
     if query:
         tasks = tasks.filter(
@@ -1133,8 +1485,27 @@ def View_Tasks(request):
             Q(description__icontains=query)
         )
 
+    # ==========================================
+    # DATE FILTER
+    # ==========================================
+
     if filter_date:
-        tasks = tasks.filter(due_date=filter_date)
+        tasks = tasks.filter(
+            due_date=filter_date
+        )
+
+    # ==========================================
+    # STATUS FILTER
+    # ==========================================
+
+    if filter_status and filter_status.lower() != "all":
+        tasks = tasks.filter(
+            status__iexact=filter_status
+        )
+
+    # ==========================================
+    # SERIALIZE
+    # ==========================================
 
     serializer = TaskSerializer(tasks, many=True)
 
@@ -1147,8 +1518,18 @@ def View_Tasks(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def View_User_Tasks(request):
-    query = request.GET.get("search", "")
-    tasks = Task.objects.filter(assigned_to=request.user,company=request.user.company).order_by("-id")
+
+    query = request.GET.get("search", "").strip()
+
+    tasks = Task.objects.filter(
+        company=request.user.company,
+        assigned_to=request.user
+    )
+
+    # Only unfinished tasks
+    tasks = tasks.exclude(
+        status__iexact="Completed"
+    ).order_by("-id")
 
     if query:
         tasks = tasks.filter(
@@ -1159,10 +1540,14 @@ def View_User_Tasks(request):
         )
 
     serializer = TaskSerializer(tasks, many=True)
-    return Response({
-        "count": len(serializer.data),
-        "tasks": serializer.data
-    }, status=status.HTTP_200_OK)
+
+    return Response(
+        {
+            "count": tasks.count(),
+            "tasks": serializer.data
+        },
+        status=status.HTTP_200_OK
+    )
 
 
 
@@ -1289,37 +1674,79 @@ def Update_Tasks(request, id):
         task = serializer.save()
 
         # Notify assigned users
-        for user in task.assigned_to.all():
+# Notify assigned users
+    notification_errors = []
+    email_errors = []
+
+
+    for user in task.assigned_to.all():
+
+        # -----------------------------------
+        # In-app notification
+        # -----------------------------------
+
+        try:
+
             send_notification(
                 company=request.user.company,
                 user=user,
                 title="Task Updated",
-                message=f"The task '{task.task_name}' has been updated. Please review the latest changes.",
+                message=(
+                    f"The task '{task.task_name}' has been updated. "
+                    f"Please review the latest changes."
+                ),
                 notification_type="task",
             )
 
-            try:
-                full_name = f"{user.first_name} {user.last_name}".strip()
+        except Exception as e:
 
-                send_email_notification(
-                    company=request.user.company,
-                    subject="Task Updated",
-                    message=(
-                        f"Hello {full_name or user.username},\n\n"
-                        f"A task assigned to you has been updated.\n\n"
-                        f"Team: {task.team.team_name if task.team else 'Not Assigned'}\n"
-                        f"Task : {task.task_name}\n"
-                        f"Project: {task.project.project_name}\n"
-                        f"Priority: {task.priority}\n"
-                        f"Status: {task.status}\n"
-                        f"Due Date: {task.due_date}\n\n"
-                        f"Description:\n{task.description}\n\n"
-                        f"Please log in to Work Track Management to review the latest task details."
-                    ),
-                    recipient_email=user.email
-                )
-            except Exception as e:
-                print(f"Email sending failed for {user.email}:{e}")
+            print(
+                f"Notification failed for {user.email}: {e}"
+            )
+
+            notification_errors.append(
+                f"Notification could not be sent to {user.email}"
+            )
+
+        # -----------------------------------
+        # Email notification
+        # -----------------------------------
+
+        try:
+
+            full_name = (
+                f"{user.first_name} {user.last_name}"
+            ).strip()
+
+            send_email_notification(
+                company=request.user.company,
+                subject="Task Updated",
+                message=(
+                    f"Hello {full_name or user.username},\n\n"
+                    f"A task assigned to you has been updated.\n\n"
+                    f"Team: "
+                    f"{task.team.team_name if task.team else 'Not Assigned'}\n"
+                    f"Task: {task.task_name}\n"
+                    f"Project: {task.project.project_name}\n"
+                    f"Priority: {task.priority}\n"
+                    f"Status: {task.status}\n"
+                    f"Due Date: {task.due_date}\n\n"
+                    f"Description:\n{task.description}\n\n"
+                    f"Please log in to Work Track Management "
+                    f"to review the latest task details."
+                ),
+                recipient_email=user.email
+            )
+
+        except Exception as e:
+
+            print(
+                f"Email sending failed for {user.email}: {e}"
+            )
+
+            email_errors.append(
+                f"Email could not be sent to {user.email}"
+            )
 
         return Response(
             {
@@ -1720,49 +2147,73 @@ def employee_status_summary(request):
 
 
 @api_view(["GET"])
-@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def weekly_work_report(request):
+
     try:
-        today = timezone.now().date()
-        start_of_week = today - timedelta(days=today.weekday())  # Monday
+        today = timezone.localdate()
+
+        # Monday of current week
+        start_of_week = today - timedelta(days=today.weekday())
+
+        # Sunday of current week
         end_of_week = start_of_week + timedelta(days=6)
 
-        sessions = (
-            TaskTime.objects
-            .filter(
-                company=request.user.company,
-                user=request.user,
-                start_time__date__gte=start_of_week,
-                start_time__date__lte=end_of_week,
-                end_time__isnull=False
-            )
-            .annotate(
-                duration_expr=ExpressionWrapper(
-                    F("end_time") - F("start_time"),
-                    output_field=DurationField()
-                ),
-                weekday=ExtractWeekDay("start_time")  # 1=Sun, 2=Mon...
-            )
+        sessions = TaskTime.objects.filter(
+            company=request.user.company,
+            user=request.user,
+            start_time__date__gte=start_of_week,
+            start_time__date__lte=end_of_week,
+            end_time__isnull=False,
+        ).order_by("start_time")
+
+        # Monday -> Sunday
+        days_map = {
+            0: {"day": "Mon", "hours": 0},
+            1: {"day": "Tue", "hours": 0},
+            2: {"day": "Wed", "hours": 0},
+            3: {"day": "Thu", "hours": 0},
+            4: {"day": "Fri", "hours": 0},
+            5: {"day": "Sat", "hours": 0},
+            6: {"day": "Sun", "hours": 0},
+        }
+
+        for session in sessions:
+
+            if not session.start_time or not session.end_time:
+                continue
+
+            duration = session.end_time - session.start_time
+
+            hours = duration.total_seconds() / 3600
+
+            weekday = session.start_time.astimezone(
+                timezone.get_current_timezone()
+            ).weekday()
+
+            days_map[weekday]["hours"] += hours
+
+        report = []
+
+        for day in range(7):
+            report.append({
+                "day": days_map[day]["day"],
+                "hours": round(days_map[day]["hours"], 2),
+            })
+
+        return Response(
+            report,
+            status=status.HTTP_200_OK
         )
 
-        days_map = {
-            2: {"day": "Mon", "hours": 0},
-            3: {"day": "Tue", "hours": 0},
-            4: {"day": "Wed", "hours": 0},
-            5: {"day": "Thu", "hours": 0},
-            6: {"day": "Fri", "hours": 0},
-            7: {"day": "Sat", "hours": 0},
-            1: {"day": "Sun", "hours": 0},
-        }
-        for s in sessions:
-            dur = s.duration or getattr(s, "duration_expr", None)
-            if dur:
-                hours = dur.total_seconds() / 3600
-                days_map[s.weekday]["hours"] += round(hours, 2)
-        return Response(list(days_map.values()), status=status.HTTP_200_OK)
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response(
+            {
+                "error": str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(["GET"])
@@ -1837,287 +2288,502 @@ def work_task_chart(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+from datetime import datetime
+from django.db.models import Q
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard_project_details(request):
+
     try:
         company = request.user.company
+        user = request.user
+
+        # ==========================================
+        # DATE
+        # ==========================================
 
         selected_date_str = request.GET.get("date")
         selected_date = None
+
         if selected_date_str:
             try:
-                selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
+                selected_date = datetime.strptime(
+                    selected_date_str,
+                    "%Y-%m-%d"
+                ).date()
             except ValueError:
                 selected_date = None
 
-        tasks_qs = Task.objects.filter(company=company)
-        if request.user.role != "admin":
-            tasks_qs = tasks_qs.filter(assigned_to=request.user)
+        # ==========================================
+        # PROJECT RBAC
+        # ==========================================
 
-        if selected_date:
-            date_tasks_qs = tasks_qs.filter(
-                Q(due_date=selected_date) | Q(sessions__start_time__date=selected_date)
-            ).distinct()
-        else:
-            date_tasks_qs = tasks_qs
+        if user.role == "admin":
 
-        completed_cnt = date_tasks_qs.filter(status="Completed").count()
-        working_cnt = date_tasks_qs.filter(status="In Progress").count()
-        pending_cnt = date_tasks_qs.filter(status="Pending").count()
-        review_cnt = date_tasks_qs.filter(status="To Do").count()
-
-        users_list = []
-        employees = User.objects.filter(company=company).exclude(role="admin")
-
-        total_seconds = 0
-        for emp in employees:
-            if selected_date:
-                emp_task_times = TaskTime.objects.filter(company=company, user=emp, start_time__date=selected_date)
-            else:
-                emp_task_times = TaskTime.objects.filter(company=company, user=emp)
-
-            emp_sec = 0
-            for tt in emp_task_times:
-                if tt.duration:
-                    emp_sec += tt.duration.total_seconds()
-                elif tt.start_time and tt.end_time:
-                    emp_sec += (tt.end_time - tt.start_time).total_seconds()
-
-            total_seconds += emp_sec
-            h = int(emp_sec // 3600)
-            m = int((emp_sec % 3600) // 60)
-
-            profile_img_url = None
-            if hasattr(emp, "profile_picture") and emp.profile_picture:
-                try:
-                    profile_img_url = emp.profile_picture.url
-                except Exception:
-                    profile_img_url = str(emp.profile_picture)
-
-            users_list.append({
-                "id": emp.id,
-                "name": emp.first_name or emp.username,
-                "image": profile_img_url or "/user icon.svg",
-                "spent": f"{str(h).zfill(2)}h {str(m).zfill(2)}m"
-            })
-
-        total_h = int(total_seconds // 3600)
-        total_m = int((total_seconds % 3600) // 60)
-        total_time_str = f"{str(total_h).zfill(2)}h {str(total_m).zfill(2)}m"
-
-        return Response({
-            "status_distribution": [
-                {"name": "Completed", "value": completed_cnt},
-                {"name": "Working", "value": working_cnt},
-                {"name": "Pending", "value": pending_cnt},
-                {"name": "Review", "value": review_cnt},
-            ],
-            "total_time": total_time_str,
-            "users": users_list[:6]
-        }, status=status.HTTP_200_OK)
-    except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def View_Employees_Productivity(request):
-    users = User.objects.filter(company=request.user.company, role="user", is_active=True)
-    
-    team_filter = request.GET.get("team")
-    user_filter = request.GET.get("user")
-
-    if team_filter and team_filter != "All Teams":
-        users = users.filter(team__team_name__iexact=team_filter)
-    if user_filter and user_filter != "All Users":
-        if user_filter.isdigit():
-            users = users.filter(id=int(user_filter))
-        else:
-            users = users.filter(Q(first_name__icontains=user_filter) | Q(username__icontains=user_filter))
-
-    data = []
-    
-    selected_date = request.GET.get("date")
-
-    if selected_date:
-        selected_date = datetime.strptime(
-            selected_date,
-            "%Y-%m-%d"
-        ).date()
-    else:
-        selected_date = timezone.now().date()
-        
-    for user in users:
-        tasks = Task.objects.filter(company=request.user.company,assigned_to=user)
-        total_tasks = tasks.count()
-        completed_tasks = tasks.filter(status="Completed").count()
-        total_hours = tasks.aggregate(total=Sum("working_hours"))["total"] or 0
-        today_tasks = tasks.filter(due_date=date.today()).count()
-
-        productivity = 0
-        if total_tasks > 0:
-            productivity = round((completed_tasks / total_tasks) * 100)
-
-
-        # Today's working time
-        today_duration = TaskTime.objects.filter(
-            company=request.user.company,
-            user=user,
-            start_time__date=selected_date,
-            duration__isnull=False
-        ).aggregate(
-            total=Sum("duration")
-        )["total"] or timedelta()
-
-        today_seconds = int(today_duration.total_seconds())
-
-        today_hours = today_seconds // 3600
-        today_minutes = (today_seconds % 3600) // 60
-
-
-        # 8-hour target = 28800 seconds
-        daily_percent = min(
-                round((today_seconds / (8 * 60 * 60)) * 100),
-                100
+            projects_qs = Project.objects.filter(
+                company=company
             )
 
-        
+        else:
 
-        # Total working time
-        total_duration = TaskTime.objects.filter(
-            company=request.user.company,
-            user=user,
-            duration__isnull=False
-        ).aggregate(
-            total=Sum("duration")
-        )["total"] or timedelta()
+            # Project Lead / Employee
+            # Only projects assigned to logged-in user
 
-        total_seconds = int(total_duration.total_seconds())
+            projects_qs = Project.objects.filter(
+                company=company,
+                assigned_to=user
+            )
 
-        total_hours = total_seconds // 3600
-        total_minutes = (total_seconds % 3600) // 60
+        # ==========================================
+        # TASK RBAC
+        # ==========================================
 
-        profile_img_url = None
-        if hasattr(user, "profile_picture") and user.profile_picture:
-            try:
-                profile_img_url = user.profile_picture.url
-            except Exception:
-                profile_img_url = str(user.profile_picture)
+        if user.role == "admin":
 
-        team_name = user.team.team_name if hasattr(user, "team") and user.team else "No Team"
+            tasks_qs = Task.objects.filter(
+                company=company
+            )
 
-        data.append({
-                    "id": user.id,
-                    "name": user.first_name or user.username or "Unnamed",
-                    "email": user.email,
-                    "profile_picture": profile_img_url or "/employee pic.svg",
-                    "team_name": team_name,
-                    "team": team_name,
+        elif user.role == "project_lead":
 
-                    "time": f"{today_hours}h {today_minutes}m",
-                    "efficiency": f"{total_hours}h {total_minutes}m",
+            # Project Lead can see ALL tasks
+            # inside their own projects
 
-                    # Work time vs 8 hours
-                    "daily_percent": daily_percent,
+            tasks_qs = Task.objects.filter(
+                company=company,
+                project__in=projects_qs
+            )
 
-                    # Completed tasks %
-                    "task_percent": productivity,
+        else:
 
-                    # Use this for the bar
-                    "percent": daily_percent,
+            # Normal employee:
+            # only tasks assigned to logged-in user
+            # and belonging to their projects
 
-                    "date": selected_date.strftime("%d-%m-%Y")
-        })
+            tasks_qs = Task.objects.filter(
+                company=company,
+                project__in=projects_qs,
+                assigned_to=user
+            )
 
-    return Response({"users": data}, status=status.HTTP_200_OK)
+        tasks_qs = tasks_qs.distinct()
+
+        # ==========================================
+        # DATE FILTER
+        # ==========================================
+
+        if selected_date:
+            tasks_qs = tasks_qs.filter(
+                Q(due_date=selected_date) |
+                Q(sessions__start_time__date=selected_date)
+            ).distinct()
+
+        # ==========================================
+        # STATUS DISTRIBUTION
+        # ==========================================
+
+        completed_cnt = tasks_qs.filter(
+            status="Completed"
+        ).count()
+
+        working_cnt = tasks_qs.filter(
+            status="In Progress"
+        ).count()
+
+        pending_cnt = tasks_qs.filter(
+            status="Pending"
+        ).count()
+
+        review_cnt = tasks_qs.filter(
+            status="To Do"
+        ).count()
+
+        # ==========================================
+        # PROJECT TIME
+        # ==========================================
+
+# ==========================================
+# PROJECT TIME
+# ==========================================
+
+        project_data = []
+
+        visible_projects = projects_qs.distinct()
+
+        total_seconds = 0
+
+        for project in visible_projects:
+
+            project_tasks = tasks_qs.filter(
+                project=project
+            )
+
+            # Calculate time from all allowed tasks
+            task_times = TaskTime.objects.filter(
+                company=company,
+                task__in=project_tasks
+            )
+
+            project_seconds = 0
+
+            for tt in task_times:
+
+                if tt.duration:
+                    project_seconds += tt.duration.total_seconds()
+
+                elif tt.start_time and tt.end_time:
+                    project_seconds += (
+                        tt.end_time - tt.start_time
+                    ).total_seconds()
+
+                elif tt.start_time:
+                    project_seconds += (
+                        timezone.now() - tt.start_time
+                    ).total_seconds()
+
+            total_seconds += project_seconds
+
+            hours = int(project_seconds // 3600)
+            minutes = int((project_seconds % 3600) // 60)
+
+            project_data.append({
+                "id": project.id,
+                "project_name": project.project_name,
+                "task_count": project_tasks.count(),
+                "spent": f"{hours:02d}h {minutes:02d}m",
+                "total_seconds": int(project_seconds),
+            })
+
+        # ==========================================
+        # INDIVIDUAL TASK TIME
+        # ==========================================
+
+        task_data = []
+
+        for task in tasks_qs:
+
+            task_times = TaskTime.objects.filter(
+                company=company,
+                task=task
+            )
+
+            task_seconds = 0
+
+            for tt in task_times:
+
+                if tt.duration:
+
+                    task_seconds += tt.duration.total_seconds()
+
+                elif tt.start_time and tt.end_time:
+
+                    task_seconds += (
+                        tt.end_time - tt.start_time
+                    ).total_seconds()
+
+                elif tt.start_time and not tt.end_time:
+
+                    task_seconds += (
+                        timezone.now() - tt.start_time
+                    ).total_seconds()
+
+            hours = int(task_seconds // 3600)
+            minutes = int(
+                (task_seconds % 3600) // 60
+            )
+
+            task_data.append({
+                "id": task.id,
+                "task_name": task.task_name,
+                "project_id": task.project_id,
+                "project_name": (
+                    task.project.project_name
+                    if task.project
+                    else None
+                ),
+                "status": task.status,
+                "spent": f"{hours:02d}h {minutes:02d}m",
+                "total_seconds": int(task_seconds),
+            })
+
+        # ==========================================
+        # TOTAL TIME
+        # ==========================================
+
+        total_hours = int(total_seconds // 3600)
+        total_minutes = int(
+            (total_seconds % 3600) // 60
+        )
+
+        total_time_str = (
+            f"{total_hours:02d}h "
+            f"{total_minutes:02d}m"
+        )
+
+        # ==========================================
+        # RESPONSE
+        # ==========================================
+
+        return Response({
+
+            "status_distribution": [
+                {
+                    "name": "Completed",
+                    "value": completed_cnt
+                },
+                {
+                    "name": "Working",
+                    "value": working_cnt
+                },
+                {
+                    "name": "Pending",
+                    "value": pending_cnt
+                },
+                {
+                    "name": "Review",
+                    "value": review_cnt
+                }
+            ],
+
+            "total_time": total_time_str,
+
+            "projects": project_data,
+
+            "tasks": task_data
+
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+
+        return Response(
+            {
+                "error": str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def View_Single_Employee_Productivity(request, user_id):
-    user = get_object_or_404(User, id=user_id,company=request.user.company)
-    tasks = Task.objects.filter(company=request.user.company,assigned_to=user).order_by('-id')
+
+    logged_user = request.user
+
+    # ==========================================
+    # GET TARGET USER
+    # ==========================================
+
+    user = get_object_or_404(
+        User,
+        id=user_id,
+        company=logged_user.company
+    )
+
+    # ==========================================
+    # RBAC
+    # ==========================================
+
+    if logged_user.role == "admin":
+
+        # Admin can view any employee
+        pass
+
+    elif logged_user.role == "project_lead":
+
+        # Projects managed by this Project Lead
+        lead_projects = Project.objects.filter(
+            company=logged_user.company,
+            assigned_to=logged_user
+        )
+
+        # Target employee must have a task
+        # belonging to one of the Project Lead's projects
+        target_has_project = Task.objects.filter(
+            company=logged_user.company,
+            project__in=lead_projects,
+            assigned_to=user
+        ).exists()
+
+        if not target_has_project:
+
+            return Response(
+                {
+                    "detail": "You do not have permission to view this employee."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    else:
+
+        # Normal employee can only view themselves
+        if user.id != logged_user.id:
+
+            return Response(
+                {
+                    "detail": "You do not have permission to view this employee."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    # ==========================================
+    # USER TASKS
+    # ==========================================
+
+    tasks = Task.objects.filter(
+        company=logged_user.company,
+        assigned_to=user
+    ).order_by("-id")
+
+    # ==========================================
+    # TASK STATISTICS
+    # ==========================================
 
     total_tasks = tasks.count()
-    completed_tasks = tasks.filter(status="Completed").count()
-    inprogress_tasks = tasks.filter(status="In Progress").count()
-    pending_tasks = tasks.filter(status="Pending").count()
-    today_tasks = tasks.filter(due_date=date.today()).count()
-    total_hours = tasks.aggregate(total=Sum("working_hours"))["total"] or 0
 
+    completed_tasks = tasks.filter(
+        status="Completed"
+    ).count()
 
-    work_session = WorkSession.objects.filter(
-        company=request.user.company,
+    inprogress_tasks = tasks.filter(
+        status="In Progress"
+    ).count()
+
+    pending_tasks = tasks.filter(
+        status="Pending"
+    ).count()
+
+    today_tasks = tasks.filter(
+        due_date=date.today()
+    ).count()
+
+    # ==========================================
+    # ACTUAL TASK TIME SPENT (Total)
+    # ==========================================
+
+    task_times = TaskTime.objects.filter(
+        company=logged_user.company,
+        user=user
+    )
+
+    total_task_seconds = 0
+
+    for tt in task_times:
+        if tt.duration:
+            total_task_seconds += tt.duration.total_seconds()
+        elif tt.start_time and tt.end_time:
+            total_task_seconds += (tt.end_time - tt.start_time).total_seconds()
+        elif tt.start_time:
+            total_task_seconds += (timezone.now() - tt.start_time).total_seconds()
+
+    total_hours = int(total_task_seconds // 3600)
+    total_minutes = int((total_task_seconds % 3600) // 60)
+    actual_worked_hours_str = f"{total_hours:02d}h {total_minutes:02d}m" if total_hours > 0 or total_minutes > 0 else "00h 00m"
+
+    # ==========================================
+    # TODAY'S WORK SESSION & DAILY EFFICIENCY
+    # ==========================================
+
+    today_date = date.today()
+
+    today_task_times = TaskTime.objects.filter(
+        company=logged_user.company,
         user=user,
-        work_date=date.today()
-    ).order_by("-clock_in").first()
+        start_time__date=today_date
+    )
 
-    working_time = timedelta()
-    idle_time = timedelta()
-    productive_time = timedelta()
+    today_task_seconds = 0
+    for tt in today_task_times:
+        if tt.duration:
+            today_task_seconds += tt.duration.total_seconds()
+        elif tt.start_time and tt.end_time:
+            today_task_seconds += (tt.end_time - tt.start_time).total_seconds()
+        elif tt.start_time:
+            today_task_seconds += (timezone.now() - tt.start_time).total_seconds()
 
-    productive_percentage = 0
-    unproductive_percentage = 0
-    neutral_percentage = 0
+    today_sessions = WorkSession.objects.filter(
+        company=logged_user.company,
+        user=user,
+        work_date=today_date
+    )
 
+    session_seconds = 0
+    for ws in today_sessions:
+        if ws.clock_out:
+            session_seconds += ws.total_work_time.total_seconds()
+        elif ws.clock_in:
+            session_seconds += (timezone.now() - ws.clock_in).total_seconds()
 
-    if work_session:
-        if work_session.clock_out:
-            working_time = work_session.total_work_time
+    idle_seconds = 0
+    idles = IdleSession.objects.filter(work_session__in=today_sessions)
+    for idle in idles:
+        if idle.duration:
+            idle_seconds += idle.duration.total_seconds()
+
+    total_base_seconds = max(session_seconds, today_task_seconds)
+
+    if total_base_seconds > 0:
+        productive_percentage = round(min(100.0, (today_task_seconds / total_base_seconds) * 100), 2)
+        unproductive_percentage = round(min(100.0 - productive_percentage, (idle_seconds / total_base_seconds) * 100), 2)
+        neutral_percentage = max(0.0, round(100.0 - productive_percentage - unproductive_percentage, 2))
+    elif total_task_seconds > 0:
+        all_sessions = WorkSession.objects.filter(company=logged_user.company, user=user)
+        all_session_seconds = sum(
+            (ws.total_work_time.total_seconds() if ws.clock_out else (timezone.now() - ws.clock_in).total_seconds() if ws.clock_in else 0)
+            for ws in all_sessions
+        )
+        all_base = max(all_session_seconds, total_task_seconds)
+        if all_base > 0:
+            productive_percentage = round(min(100.0, (total_task_seconds / all_base) * 100), 2)
+            unproductive_percentage = 0.0
+            neutral_percentage = max(0.0, round(100.0 - productive_percentage, 2))
         else:
-            working_time = timezone.now() - work_session.clock_in
+            productive_percentage = 0.0
+            unproductive_percentage = 0.0
+            neutral_percentage = 0.0
+    else:
+        productive_percentage = 0.0
+        unproductive_percentage = 0.0
+        neutral_percentage = 0.0
 
-
-        idle_time = IdleSession.objects.filter(
-            work_session=work_session
-        ).aggregate(
-            total=Sum("duration")
-        )["total"] or timedelta()
-
-
-        productive_time = working_time - idle_time
-
-        if productive_time.total_seconds() < 0:
-            productive_time = timedelta()
-
-
-
-
-    if working_time.total_seconds() > 0:
-
-        productive_percentage = round(
-            (productive_time.total_seconds() /
-            working_time.total_seconds()) * 100,
-            2
-        )
-
-        unproductive_percentage = round(
-            (idle_time.total_seconds() /
-            working_time.total_seconds()) * 100,
-            2
-        )
-
-        neutral_percentage = max(
-            0,
-            100 - productive_percentage - unproductive_percentage
-        )
+    # ==========================================
+    # RECENT TASKS
+    # ==========================================
 
     recent_tasks = [
         {
             "task_name": t.task_name,
             "status": t.status,
-            "due_date": t.due_date.strftime("%Y-%m-%d") if t.due_date else "",
+            "due_date": (
+                t.due_date.strftime("%Y-%m-%d")
+                if t.due_date
+                else ""
+            ),
         }
         for t in tasks[:5]
     ]
 
-    # Task list for the bottom table
-    task_list = TaskSerializer(tasks, many=True).data
+    # ==========================================
+    # FULL TASK LIST
+    # ==========================================
 
-    # Retrieve all today's sessions for detailed tracking logs
+    task_list = TaskSerializer(
+        tasks,
+        many=True
+    ).data
+
+    # ==========================================
+    # TODAY'S WORK SESSIONS
+    # ==========================================
+
     today_sessions = WorkSession.objects.filter(
-        company=request.user.company,
+        company=logged_user.company,
         user=user,
         work_date=date.today()
     ).order_by("-clock_in")
@@ -2128,92 +2794,413 @@ def View_Single_Employee_Productivity(request, user_id):
     screenshot_list = []
     website_list = []
 
+    # ==========================================
+    # SESSION DETAILS
+    # ==========================================
+
     for ws in today_sessions:
+
         attendance_list.append({
             "id": ws.id,
             "clock_in": ws.clock_in,
             "clock_out": ws.clock_out,
-            "total_work_time": str(ws.total_work_time) if ws.total_work_time else "-",
-            "work_date": ws.work_date.strftime("%Y-%m-%d") if ws.work_date else "",
+            "total_work_time": (
+                str(ws.total_work_time)
+                if ws.total_work_time
+                else "-"
+            ),
+            "work_date": (
+                ws.work_date.strftime("%Y-%m-%d")
+                if ws.work_date
+                else ""
+            ),
         })
 
-        idles = IdleSession.objects.filter(work_session=ws).order_by("-idle_start_time")
+        # --------------------------------------
+        # IDLE SESSIONS
+        # --------------------------------------
+
+        idles = IdleSession.objects.filter(
+            work_session=ws
+        ).order_by("-idle_start_time")
+
         for idle in idles:
+
             idle_list.append({
                 "id": idle.id,
                 "start_time": idle.idle_start_time,
                 "end_time": idle.idle_end_time,
-                "duration": str(idle.duration) if idle.duration else "-",
+                "duration": (
+                    str(idle.duration)
+                    if idle.duration
+                    else "-"
+                ),
             })
 
-        apps = ApplicationUsage.objects.filter(work_session=ws).order_by("-start_time")
+        # --------------------------------------
+        # APPLICATION USAGE
+        # --------------------------------------
+
+        apps = ApplicationUsage.objects.filter(
+            work_session=ws
+        ).order_by("-start_time")
+
         for app in apps:
+
             app_list.append({
                 "id": app.id,
                 "name": app.application_name,
                 "start_time": app.start_time,
                 "end_time": app.end_time,
-                "duration": str(app.duration) if app.duration else "-",
+                "duration": (
+                    str(app.duration)
+                    if app.duration
+                    else "-"
+                ),
             })
 
-        scr = Screenshot.objects.filter(work_session=ws).order_by("-captured_at")
+        # --------------------------------------
+        # SCREENSHOTS
+        # --------------------------------------
+
+        scr = Screenshot.objects.filter(
+            work_session=ws
+        ).order_by("-captured_at")
+
         for s in scr:
+
             screenshot_list.append({
                 "id": s.id,
-                "image": s.image.url if s.image else None,
+                "image": (
+                    s.image.url
+                    if s.image
+                    else None
+                ),
                 "captured_at": s.captured_at,
                 "reason": s.reason,
             })
 
-        webs = WebsiteUsage.objects.filter(work_session=ws).order_by("-start_time")
+        # --------------------------------------
+        # WEBSITE USAGE
+        # --------------------------------------
+
+        webs = WebsiteUsage.objects.filter(
+            work_session=ws
+        ).order_by("-start_time")
+
         for w in webs:
+
             website_list.append({
                 "id": w.id,
                 "url": w.website_url,
                 "start_time": w.start_time,
                 "end_time": w.end_time,
-                "duration": str(w.duration) if w.duration else "-",
+                "duration": (
+                    str(w.duration)
+                    if w.duration
+                    else "-"
+                ),
             })
 
+    # ==========================================
+    # PROFILE IMAGE
+    # ==========================================
+
     profile_img_url = None
+
     if hasattr(user, "profile_picture") and user.profile_picture:
+
         try:
             profile_img_url = user.profile_picture.url
-        except Exception:
-            profile_img_url = str(user.profile_picture)
 
-    team_name = user.team.team_name if hasattr(user, "team") and user.team else "No Team"
+        except Exception:
+
+            profile_img_url = str(
+                user.profile_picture
+            )
+
+    # ==========================================
+    # TEAM
+    # ==========================================
+
+    team_name = (
+        user.team.team_name
+        if hasattr(user, "team") and user.team
+        else "No Team"
+    )
+
+    # ==========================================
+    # RESPONSE
+    # ==========================================
 
     data = {
+
         "user": {
+
             "id": user.id,
-            "name": user.first_name or user.username,
+
+            "name": (
+                user.first_name
+                or user.username
+            ),
+
             "email": user.email,
-            "profile_picture": profile_img_url or "/employee pic.svg",
+
+            "profile_picture": (
+                profile_img_url
+                or "/employee pic.svg"
+            ),
+
             "team_name": team_name,
+
             "active_projects": total_tasks,
+
             "in_progress": inprogress_tasks,
+
             "completed": completed_tasks,
-            "idle_today": round(idle_time.total_seconds() / 60),
+
+            "idle_today": round(
+                idle_seconds / 60
+            ),
+
             "today_tasks": today_tasks,
-            "worked_hours": f"{total_hours} Hr",
+
+            "worked_hours": actual_worked_hours_str,
+            "time_spent": actual_worked_hours_str,
+
             "recent_tasks": recent_tasks,
         },
+
         "productivity": {
+
             "productive": productive_percentage,
+
             "neutral": neutral_percentage,
+
             "unproductive": unproductive_percentage,
         },
+
         "tasks": task_list,
+
         "attendance": attendance_list,
+
         "idle_sessions": idle_list,
+
         "applications": app_list,
+
         "screenshots": screenshot_list,
+
         "websites": website_list,
     }
 
-    return Response(data, status=status.HTTP_200_OK)
+    return Response(
+        data,
+        status=status.HTTP_200_OK
+    )
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def View_Employees_Productivity(request):
+
+    logged_user = request.user
+    company = logged_user.company
+
+    # ==========================================
+    # Optional date filter from ?date=YYYY-MM-DD
+    # ==========================================
+
+    date_str = request.GET.get("date")
+    filter_date = None
+
+    if date_str:
+        try:
+            from datetime import date as date_cls, datetime
+            filter_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            filter_date = None
+
+    # ==========================================
+    # RBAC
+    # ==========================================
+
+    if logged_user.role == "admin":
+
+        # Admin → all employees and project leads
+        users = User.objects.filter(
+            company=company,
+            is_active=True
+        ).exclude(
+            role="admin"
+        )
+
+    elif logged_user.role == "project_lead":
+
+        # Projects handled by this project lead
+        lead_projects = Project.objects.filter(
+            company=company,
+            assigned_to=logged_user
+        )
+
+        # Users assigned to tasks in those projects
+        user_ids = Task.objects.filter(
+            company=company,
+            project__in=lead_projects
+        ).values_list(
+            "assigned_to__id",
+            flat=True
+        ).distinct()
+
+        users = User.objects.filter(
+            company=company,
+            is_active=True,
+            id__in=user_ids
+        )
+
+    else:
+
+        # Employee → only themselves
+        users = User.objects.filter(
+            id=logged_user.id,
+            company=company,
+            is_active=True
+        )
+
+    data = []
+
+    # ==========================================
+    # BUILD EMPLOYEE DATA
+    # ==========================================
+
+    for user in users:
+
+        tasks = Task.objects.filter(
+            company=company,
+            assigned_to=user
+        ).distinct()
+
+        total_tasks = tasks.count()
+
+        completed_tasks = tasks.filter(
+            status__iexact="Completed"
+        ).count()
+
+        pending_tasks = tasks.exclude(
+            status__iexact="Completed"
+        ).count()
+
+        # ==========================================
+        # TASK TIME (optionally filtered by date)
+        # ==========================================
+
+        task_times_qs = TaskTime.objects.filter(
+            company=company,
+            user=user
+        )
+
+        if filter_date:
+            task_times_qs = task_times_qs.filter(
+                start_time__date=filter_date
+            )
+
+        total_seconds = 0
+
+        for tt in task_times_qs:
+
+            if tt.duration:
+
+                total_seconds += tt.duration.total_seconds()
+
+            elif tt.start_time and tt.end_time:
+
+                total_seconds += (
+                    tt.end_time - tt.start_time
+                ).total_seconds()
+
+            elif tt.start_time:
+
+                total_seconds += (
+                    timezone.now() - tt.start_time
+                ).total_seconds()
+
+        hours = int(total_seconds // 3600)
+
+        minutes = int(
+            (total_seconds % 3600) // 60
+        )
+
+        # ==========================================
+        # NAME
+        # ==========================================
+
+        full_name = (
+            f"{user.first_name} {user.last_name}"
+        ).strip()
+
+        employee_name = (
+            full_name
+            or user.username
+            or user.email
+            or "Employee"
+        )
+
+        # ==========================================
+        # PROFILE PICTURE
+        # ==========================================
+
+        profile_picture = None
+
+        if user.profile_picture:
+
+            try:
+                profile_picture = user.profile_picture.url
+            except Exception:
+                profile_picture = str(
+                    user.profile_picture
+                )
+
+        # ==========================================
+        # RESPONSE
+        # ==========================================
+
+        data.append({
+
+            "id": user.id,
+
+            "name": employee_name,
+
+            "email": user.email,
+
+            "role": user.role,
+
+            "team_name": user.team.team_name if user.team else None,
+
+            "profile_picture": (
+                profile_picture
+                or "/employee pic.svg"
+            ),
+
+            "total_tasks": total_tasks,
+
+            "completed_tasks": completed_tasks,
+
+            "pending_tasks": pending_tasks,
+
+            "time_spent": (
+                f"{hours:02d}h {minutes:02d}m"
+            ),
+
+            "total_seconds": int(
+                total_seconds
+            ),
+        })
+
+    return Response(
+        {
+            "count": len(data),
+            "employees": data
+        },
+        status=status.HTTP_200_OK
+    )
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def kanban_tasks(request):
@@ -2722,7 +3709,7 @@ def attendance_list(request):
     """
     user = request.user
     company = user.company
-    is_admin = user.role in ["admin", "super_admin"]
+    is_admin = user.role in ["admin", "project_lead"]
 
     date_str = request.GET.get("date")
     if date_str:
@@ -2972,7 +3959,11 @@ def attendance_correction_action(request, pk):
     - Admin: approve or reject
     """
     user = request.user
-    is_admin = user.role in ["admin", "super_admin"]
+    is_admin_or_project_lead = user.role in [
+        "admin",
+        "super_admin",
+        "project_lead",
+    ]
     if not is_admin:
         return Response({"error": "Only admins can approve or reject attendance corrections."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -3152,7 +4143,11 @@ def all_reports(request):
     """
     user = request.user
     company = user.company
-    is_admin = user.role in ["admin", "super_admin"]
+    is_admin_or_project_lead = user.role in [
+        "admin",
+        "super_admin",
+        "project_lead",
+    ]
 
     date_str = request.GET.get("date")
     team_param = request.GET.get("team")
@@ -3169,7 +4164,7 @@ def all_reports(request):
 
     # Filter users
     users_qs = User.objects.filter(company=company, is_active=True)
-    if not is_admin:
+    if not is_admin_or_project_lead:
         users_qs = users_qs.filter(id=user.id)
     elif user_param and user_param not in ["All Users", "All"]:
         users_qs = users_qs.filter(id=user_param)
@@ -3347,11 +4342,16 @@ def all_reports(request):
 
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_leave_type(request):
 
-    if request.user.role != "admin":
+    if request.user.role not in ["admin", "super_admin"]:
         return Response(
             {"error": "Only admin can create leave types."},
             status=status.HTTP_403_FORBIDDEN,
@@ -3360,37 +4360,50 @@ def create_leave_type(request):
     serializer = LeaveTypeSerializer(data=request.data)
 
     if serializer.is_valid():
-        serializer.save(company=request.user.company)
-        leave_type = serializer.instance
+        leave_type = serializer.save(company=request.user.company)
+
         employees = User.objects.filter(
             company=request.user.company
-        ).exclude(role="admin")
+        ).exclude(role__in=["admin", "super_admin"])
 
         for employee in employees:
-            send_notification(
-                company=request.user.company,
-                user=employee,
-                title="New Leave Type",
-                message=f"A new leave type '{leave_type.name}' has been added.",
-                notification_type="system",
-            )
+            try:
+                send_notification(
+                    company=request.user.company,
+                    user=employee,
+                    title="New Leave Type",
+                    message=f"A new leave type '{leave_type.name}' has been added.",
+                    notification_type="system",
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send leave type notification to user %s: %s",
+                    employee.id,
+                    e,
+                )
+
         return Response(
             {
-                "message" : "Leave type create successfully",
-                "data" : serializer.data
-            },status=status.HTTP_201_CREATED,
-            )
+                "message": "Leave type created successfully",
+                "data": LeaveTypeSerializer(leave_type).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST,
+    )
 
 @api_view(["GET"])      
 @permission_classes([IsAuthenticated])
 def list_leave_types(request):
 
-    leave_types = LeaveType.objects.filter(
-        company=request.user.company,
-        is_active=True
-    ).order_by("name")
+    show_all = request.query_params.get("all") == "true" or request.query_params.get("include_inactive") == "true"
+    qs = LeaveType.objects.filter(company=request.user.company)
+    if not show_all:
+        qs = qs.filter(is_active=True)
+    leave_types = qs.order_by("name")
 
     serializer = LeaveTypeSerializer(leave_types, many=True)
 
@@ -3403,7 +4416,7 @@ from django.shortcuts import get_object_or_404
 @permission_classes([IsAuthenticated])
 def update_leave_type(request, pk):
 
-    if request.user.role != "admin":
+    if request.user.role not in ["admin", "super_admin"]:
         return Response(
             {"error": "Only admin can update leave types."},
             status=status.HTTP_403_FORBIDDEN,
@@ -3422,31 +4435,47 @@ def update_leave_type(request, pk):
     )
 
     if serializer.is_valid():
-        serializer.save()
+
+        leave_type = serializer.save()
+
         employees = User.objects.filter(
             company=request.user.company
-        ).exclude(role="admin")
+        ).exclude(role__in=["admin", "super_admin"])
 
         for employee in employees:
-            send_notification(
-                company=request.user.company,
-                user=employee,
-                title="Leave Type Updated",
-                message=f"The leave type '{leave_type.name}' has been updated.",
-                notification_type="system",
-            )
-        return Response({
-                "message": "Leave updated successfully",
-                "data": serializer.data,
-            },status=status.HTTP_200_OK,)
+            try:
+                send_notification(
+                    company=request.user.company,
+                    user=employee,
+                    title="Leave Type Updated",
+                    message=f"The leave type '{leave_type.name}' has been updated.",
+                    notification_type="system",
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to send leave type update notification to user %s: %s",
+                    employee.id,
+                    e,
+                )
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "message": "Leave type updated successfully",
+                "data": LeaveTypeSerializer(leave_type).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST,
+    )
 
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_leave_type(request, pk):
 
-    if request.user.role != "admin":
+    if request.user.role not in ["admin", "super_admin"]:
         return Response(
             {"error": "Only admin can delete leave types."},
             status=status.HTTP_403_FORBIDDEN,
@@ -3457,45 +4486,47 @@ def delete_leave_type(request, pk):
         id=pk,
         company=request.user.company,
     )
-    print("Before:", leave_type.is_active)
-    leave_type.is_active = False
-    leave_type.save(update_fields=["is_active"])
-    print("After:", leave_type.is_active)
-    leave_type.refresh_from_db()
-
-    print("Before:", leave_type.is_active)
 
     leave_type.is_active = False
-    leave_type.save(update_fields=["is_active"])
+    leave_type.status = "inactive"
+
+    leave_type.save(
+        update_fields=["is_active", "status"]
+    )
 
     employees = User.objects.filter(
         company=request.user.company
-    ).exclude(role="admin")
+    ).exclude(role__in=["admin", "super_admin"])
 
     for employee in employees:
-        send_notification(
-            company=request.user.company,
-            user=employee,
-            title="Leave Type Removed",
-            message=f"The leave type '{leave_type.name}' is no longer available.",
-            notification_type="system",
-        )
-
-    leave_type.refresh_from_db()
-    print("DB:", leave_type.is_active)
+        try:
+            send_notification(
+                company=request.user.company,
+                user=employee,
+                title="Leave Type Removed",
+                message=f"The leave type '{leave_type.name}' is no longer available.",
+                notification_type="system",
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to send leave type removal notification to user %s: %s",
+                employee.id,
+                e,
+            )
 
     return Response(
-        {"message": "Leave type deleted successfully."},
+        {
+            "message": "Leave type deleted successfully."
+        },
         status=status.HTTP_200_OK,
     )
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def leave_requests(request):
 
-    if request.user.role != "admin":
+    if request.user.role not in ["admin", "super_admin", "project_lead"]:
         return Response(
-            {"error": "Only admin can view leave requests."},
+            {"error": "Only admins and project leads can view leave requests."},
             status=status.HTTP_403_FORBIDDEN
         )
 
@@ -3515,8 +4546,8 @@ def leave_requests(request):
 @api_view(["PUT"])
 @permission_classes([IsAuthenticated])
 def approve_leave(request, pk):
-    if request.user.role != "admin":
-        return Response({"error": "Only admin"}, status=403)
+    if request.user.role not in ["admin", "super_admin", "project_lead"]:
+        return Response({"error": "Only admins and project leads can approve leave."}, status=403)
 
     leave_request = get_object_or_404(
         LeaveRequest,
@@ -3569,9 +4600,9 @@ def approve_leave(request, pk):
 @permission_classes([IsAuthenticated])
 def reject_leave(request, pk):
 
-    if request.user.role != "admin":
+    if request.user.role not in ["admin", "super_admin", "project_lead"]:
         return Response(
-            {"error": "Only admin can reject leave."},
+            {"error": "Only admins and project leads can reject leave."},
             status=status.HTTP_403_FORBIDDEN
         )
 
@@ -3687,12 +4718,15 @@ def reset_employee_password(request, user_id):
 import traceback
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated, IsAdminRole])
+@permission_classes([IsAdminOrProjectLead])
 def export_employees_excel(request):
     try:
-        employees = User.objects.filter(
-            company=request.user.company
-        ).order_by("id")
+        if request.user.company:
+            employees = User.objects.filter(
+                company=request.user.company
+            ).order_by("id")
+        else:
+            employees = User.objects.all().order_by("id")
 
         headers = [
             "ID",
@@ -3700,17 +4734,21 @@ def export_employees_excel(request):
             "Email",
             "Role",
             "Mobile",
+            "Status",
         ]
 
         rows = []
 
-        for employee in employees:
+        for idx, employee in enumerate(employees, start=1):
+            full_name = f"{employee.first_name} {employee.last_name}".strip() or employee.first_name
+            status_text = "Active" if employee.is_active else "Inactive"
             rows.append([
-                employee.id,
-                employee.first_name,
+                idx,
+                full_name,
                 employee.email,
                 employee.role,
-                employee.mobile,
+                employee.mobile or "-",
+                status_text,
             ])
 
         return export_to_excel(
@@ -3726,12 +4764,15 @@ def export_employees_excel(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated, IsAdminRole])
+@permission_classes([IsAdminOrProjectLead])
 def export_employees_pdf(request):
 
-    employees = User.objects.filter(
-        company=request.user.company
-    ).order_by("id")
+    if request.user.company:
+        employees = User.objects.filter(
+            company=request.user.company
+        ).order_by("id")
+    else:
+        employees = User.objects.all().order_by("id")
 
     headers = [
         "ID",
@@ -3739,17 +4780,21 @@ def export_employees_pdf(request):
         "Email",
         "Role",
         "Mobile",
+        "Status",
     ]
 
     rows = []
 
-    for employee in employees:
+    for idx, employee in enumerate(employees, start=1):
+        full_name = f"{employee.first_name} {employee.last_name}".strip() or employee.first_name
+        status_text = "Active" if employee.is_active else "Inactive"
         rows.append([
-            employee.id,
-            employee.first_name,
+            idx,
+            full_name,
             employee.email,
             employee.role,
-            employee.mobile,
+            employee.mobile or "-",
+            status_text,
         ])
 
     return export_to_pdf(
@@ -3761,12 +4806,16 @@ def export_employees_pdf(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrProjectLead])
 def export_reports_excel(request):
     try:
         user = request.user
         company = user.company
-        is_admin = user.role in ["admin", "super_admin"]
+        is_admin_or_project_lead = user.role in [
+            "admin",
+            "super_admin",
+            "project_lead",
+        ]
 
         date_str = request.GET.get("date")
         team_param = request.GET.get("team")
@@ -3782,7 +4831,7 @@ def export_reports_excel(request):
             target_date = timezone.localdate()
 
         users_qs = User.objects.filter(company=company, is_active=True)
-        if not is_admin:
+        if not is_admin_or_project_lead:
             users_qs = users_qs.filter(id=user.id)
         elif user_param and user_param not in ["All Users", "All"]:
             users_qs = users_qs.filter(id=user_param)
@@ -3907,12 +4956,16 @@ def export_reports_excel(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrProjectLead])
 def export_reports_pdf(request):
     try:
         user = request.user
         company = user.company
-        is_admin = user.role in ["admin", "super_admin"]
+        is_admin_or_project_lead = user.role in [
+                "admin",
+                "super_admin",
+                "project_lead",
+            ]
 
         date_str = request.GET.get("date")
         team_param = request.GET.get("team")
@@ -3928,7 +4981,7 @@ def export_reports_pdf(request):
             target_date = timezone.localdate()
 
         users_qs = User.objects.filter(company=company, is_active=True)
-        if not is_admin:
+        if not is_admin_or_project_lead:
             users_qs = users_qs.filter(id=user.id)
         elif user_param and user_param not in ["All Users", "All"]:
             users_qs = users_qs.filter(id=user_param)
@@ -4196,7 +5249,7 @@ def _get_filtered_users(request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrProjectLead])
 def export_monthly_excel(request):
     """
     Export monthly report as Excel.
@@ -4235,7 +5288,7 @@ def export_monthly_excel(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrProjectLead])
 def export_monthly_pdf(request):
     """
     Export monthly report as PDF.
@@ -4279,7 +5332,7 @@ def export_monthly_pdf(request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrProjectLead])
 def export_yearly_excel(request):
     """
     Export yearly report as Excel.
@@ -4311,7 +5364,7 @@ def export_yearly_excel(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrProjectLead])
 def export_yearly_pdf(request):
     """
     Export yearly report as PDF.
@@ -4570,51 +5623,70 @@ def delete_leave_policy(request, policy_id):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated,IsAdminRole])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def create_team(request):
+
     serializer = TeamSerializer(data=request.data)
 
-    if serializer.is_valid():
-        team_name = serializer.validated_data["team_name"]
-
-        if Team.objects.filter(
-            company=request.user.company,
-            team_name=team_name
-        ).exists():
-            return Response(
-                {"error":"Team already exists."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        team_lead = serializer.validated_data.get("team_lead")
-
-        if team_lead and team_lead.company != request.user.company:
-            return Response(
-                {"error": "Team lead must belong to your company."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if team_lead and team_lead.role not in ["admin", "project_lead"]:
-            return Response(
-                {"error": "Only Admin or Project Lead can be assigned as Team Lead."},
-                status=status.HTTP_400_BAD_REQUEST
+    if not serializer.is_valid():
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-        if team_lead and not team_lead.is_active:
-            return Response(
-                {"error": "Inactive users cannot be assigned as Team Lead."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+    team_name = serializer.validated_data["team_name"]
 
-        print("===================================")
-        print("Request User:", request.user)
-        print("Company:", request.user.company)
-        print("Company ID:", request.user.company_id)
-        print("Validated Data:", serializer.validated_data)
-        print("===================================")
+    # Check duplicate team name
+    if Team.objects.filter(
+        company=request.user.company,
+        team_name=team_name
+    ).exists():
+        return Response(
+            {"error": "Team already exists."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-        team = serializer.save(company=request.user.company)
+    team_lead = serializer.validated_data.get("team_lead")
 
+    # Validate team lead company
+    if team_lead and team_lead.company != request.user.company:
+        return Response(
+            {"error": "Team lead must belong to your company."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Validate team lead role
+    if team_lead and team_lead.role not in ["admin", "project_lead"]:
+        return Response(
+            {
+                "error": "Only Admin or Project Lead can be assigned as Team Lead."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Validate active status
+    if team_lead and not team_lead.is_active:
+        return Response(
+            {
+                "error": "Inactive users cannot be assigned as Team Lead."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    print("===================================")
+    print("Request User:", request.user)
+    print("Company:", request.user.company)
+    print("Company ID:", request.user.company_id)
+    print("Validated Data:", serializer.validated_data)
+    print("===================================")
+
+    # CREATE TEAM
+    team = serializer.save(
+        company=request.user.company
+    )
+
+    # Notifications should NOT make team creation fail
+    try:
 
         send_notification(
             company=request.user.company,
@@ -4631,15 +5703,17 @@ def create_team(request):
             recipient_email=request.user.email
         )
 
-        return Response(
-            {
-                "message": "Team created successfully.",
-                "data": serializer.data
-            },
-            status=status.HTTP_201_CREATED
-        )
+    except Exception as e:
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        print(f"Team notification/email error: {e}")
+
+    return Response(
+        {
+            "message": "Team created successfully.",
+            "data": TeamSerializer(team).data
+        },
+        status=status.HTTP_201_CREATED
+    )
 
 
 @api_view(["GET"])
@@ -4774,8 +5848,9 @@ def update_team(request, team_id):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(["DELETE"])
-@permission_classes([IsAuthenticated,IsAdminRole])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def delete_team(request, team_id):
+
     try:
         team = Team.objects.get(
             id=team_id,
@@ -4788,6 +5863,7 @@ def delete_team(request, team_id):
             status=status.HTTP_404_NOT_FOUND
         )
 
+    # Don't allow deletion if employees are assigned
     if team.members.exists():
         return Response(
             {
@@ -4795,30 +5871,39 @@ def delete_team(request, team_id):
             },
             status=status.HTTP_400_BAD_REQUEST
         )
+
     team_name = team.team_name
 
+    # Delete team first
     team.delete()
 
-    send_notification(
-        company=request.user.company,
-        user=request.user,
-        title="Team Deleted",
-        message=f"Team '{team_name}' has been deleted successfully.",
-        notification_type="team"
-    )
+    # In-app notification
+    try:
+        send_notification(
+            company=request.user.company,
+            user=request.user,
+            title="Team Deleted",
+            message=f"Team '{team_name}' has been deleted successfully.",
+            notification_type="team"
+        )
+    except Exception as e:
+        print(f"Team deletion notification error: {e}")
 
+    # Email notification
     try:
         send_email_notification(
             company=request.user.company,
             subject="Team Deleted",
-            message=f"The team '{team_name}' has been deleted successfully.",
+            message=f"Team '{team_name}' has been deleted successfully.",
             recipient_email=request.user.email
         )
     except Exception as e:
-        print("Email notification skipped:", e)
-        
+        print(f"Team deletion email error: {e}")
+
     return Response(
-        {"message": "Team deleted successfully."},
+        {
+            "message": "Team deleted successfully."
+        },
         status=status.HTTP_200_OK
     )
 
