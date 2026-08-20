@@ -27,7 +27,7 @@ from work_track_admin.email_service import send_email_notification
 
 
 
-from work_track_admin.monitor_service import start_monitor_service, trigger_immediate_capture
+# from work_track_admin.monitor_service import start_monitor_service, trigger_immediate_capture
 
 # Create your views here.
 @api_view(["POST"])
@@ -43,7 +43,6 @@ def clock_in(request):
 
     if active_session:
         # Ensure monitor service is active
-        start_monitor_service()
         return Response(
             {
                 "success": False,
@@ -58,11 +57,6 @@ def clock_in(request):
     )
 
     # Automatically start the Python background desktop monitoring service
-    try:
-        start_monitor_service()
-        trigger_immediate_capture(request.user.id, reason="periodic")
-    except Exception as e:
-        print("Monitor service start notice:", e)
 
     # Create initial application usage record
     try:
@@ -298,6 +292,7 @@ def upload_screenshot(request):
         )
 
     # Upload to Cloudinary or fallback to storage
+    filename = f"{request.user.id}_{timezone.now():%Y%m%d_%H%M%S}"
     image_identifier = None
     try:
         if CLOUDINARY_AVAILABLE and os.getenv("CLOUDINARY_CLOUD_NAME"):

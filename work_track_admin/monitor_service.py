@@ -36,7 +36,7 @@ try:
     import pyautogui
     PYAUTOGUI_AVAILABLE = True
 except ImportError:
-    PYAUTOGUI_AVAILABLE = False
+    PYAUTOGUI_AVAILABLE = False 
 
 try:
     import mss
