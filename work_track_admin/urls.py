@@ -123,12 +123,16 @@ urlpatterns = [
     path("update-team/<int:team_id>/", views.update_team),
     path("delete-team/<int:team_id>/", views.delete_team),
 
+    path("active-teams/",views.active_teams,name="active-teams"),
+
     # Settings endpoints
     path("company/info/", views.company_info_settings, name="company_info_settings"),
     path("security-settings/", views.security_settings, name="security_settings"),
     path("admin-monitoring-settings/", views.admin_monitoring_settings, name="admin_monitoring_settings"),
     path("account-settings/", views.account_settings, name="account_settings"),
     path("global-search/", views.global_search, name="global_search"),
+    path("employees/productivity/<int:user_id>/export/",views.export_employee_productivity,name="export_employee_productivity"),
+    path("view_team/<int:team_id>/details/",views.team_details,name="team_details"),
 
     
 ]   

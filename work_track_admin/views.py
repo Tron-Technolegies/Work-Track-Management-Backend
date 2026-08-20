@@ -54,6 +54,12 @@ from .permissions import (
     IsAdminOrProjectLead,
     IsAdminOrOwner,
 )
+from .exports.productivity_export import (
+    get_report_date_range,
+    build_productivity_data,
+    generate_productivity_excel,
+    generate_productivity_pdf,
+)
 from .serializers import (
     UserSerializer,
     TaskSerializer,
@@ -364,7 +370,8 @@ def Create_Employee(request):
         try:
             team = Team.objects.get(
                 id=team_id,
-                company=user_company
+                company=user_company,
+                status__iexact="active"
             )
 
         except (Team.DoesNotExist, ValueError):
@@ -624,11 +631,28 @@ def current_user(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def Get_Users(request):
+    team_id = request.query_params.get("team_id") or request.query_params.get("team")
 
-    users = User.objects.filter(
-        company=request.user.company,
-        is_active=True
-    ).exclude(role="admin")
+    if request.user.role in ("admin", "super_admin"):
+        users = User.objects.filter(
+            company=request.user.company,
+            is_active=True
+        ).exclude(role="admin")
+        if team_id and str(team_id).lower() != "all":
+            users = users.filter(team_id=team_id)
+    else:
+        if request.user.team:
+            users = User.objects.filter(
+                company=request.user.company,
+                team=request.user.team,
+                is_active=True
+            ).exclude(role="admin")
+        else:
+            users = User.objects.filter(
+                id=request.user.id,
+                company=request.user.company,
+                is_active=True
+            )
 
     serializer = UserSerializer(users, many=True)
 
@@ -638,13 +662,33 @@ def Get_Users(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def Get_User_List(request):
+    team_id = request.query_params.get("team_id") or request.query_params.get("team")
 
-    users = User.objects.filter(
-        company=request.user.company,
-        is_active=True
-    ).exclude(
-        role="admin"
-    ).order_by("first_name")
+    if request.user.role in ("admin", "super_admin"):
+        users = User.objects.filter(
+            company=request.user.company,
+            is_active=True
+        ).exclude(
+            role="admin"
+        ).order_by("first_name")
+        if team_id and str(team_id).lower() != "all":
+            users = users.filter(team_id=team_id)
+    else:
+        if request.user.team:
+            users = User.objects.filter(
+                company=request.user.company,
+                team=request.user.team,
+                is_active=True
+            ).exclude(
+                role="admin"
+            ).order_by("first_name")
+        else:
+            users = User.objects.filter(
+                id=request.user.id,
+                company=request.user.company,
+                is_active=True
+            ).order_by("first_name")
+
     serializer = UserSerializer(users, many=True)
 
     data = [
@@ -819,10 +863,11 @@ def Add_Projects(request):
     if team_id:
         if not Team.objects.filter(
             id=team_id,
-            company=request.user.company
+            company=request.user.company,
+            status__iexact="active"
         ).exists():
             return Response(
-                {"error": "Invalid team selected."},
+                {"error": "Selected team is invalid or inactive."},
                 status=status.HTTP_400_BAD_REQUEST
             )
     assigned_users = formatted_data.get("assigned_to", [])
@@ -902,13 +947,23 @@ def Add_Projects(request):
 @permission_classes([IsAuthenticated])
 def View_Projects(request):
 
-    if request.user.role == "admin":
+    team_filter = request.query_params.get("team_id") or request.query_params.get("team")
+
+    if request.user.role in ("admin", "super_admin"):
         projects = Project.objects.filter(company=request.user.company).order_by("-id")
+        if team_filter and str(team_filter).lower() != "all":
+            projects = projects.filter(team_id=team_filter)
+    elif request.user.team:
+        projects = Project.objects.filter(
+            company=request.user.company
+        ).filter(
+            Q(team=request.user.team) | Q(assigned_to=request.user)
+        ).distinct().order_by("-id")
     else:
         projects = Project.objects.filter(
             company=request.user.company,
             assigned_to=request.user
-    ).order_by("-id")
+        ).order_by("-id")
 
     serializer = ProjectSerializer(projects, many=True)
     data = serializer.data
@@ -932,12 +987,20 @@ def View_Projects(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def View_Single_Project(request, project_id):
-    if request.user.role == "admin":
+    if request.user.role in ("admin", "super_admin"):
         project = get_object_or_404(
-        Project,
-        id=project_id,
-        company=request.user.company
-    )
+            Project,
+            id=project_id,
+            company=request.user.company
+        )
+    elif request.user.team:
+        project = get_object_or_404(
+            Project.objects.filter(
+                Q(team=request.user.team) | Q(assigned_to=request.user)
+            ).distinct(),
+            id=project_id,
+            company=request.user.company
+        )
     else:
         project = get_object_or_404(
             Project,
@@ -983,10 +1046,11 @@ def update_projects(request, id):
     if team_id:
         if not Team.objects.filter(
             id=team_id,
-            company=request.user.company
+            company=request.user.company,
+            status__iexact="active"
         ).exists():
             return Response(
-                {"error": "Invalid team selected."},
+                {"error": "Selected team is invalid or inactive."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1219,11 +1283,24 @@ def project_dropdown(request):
         )
 
     projects = projects.values(
-    "id",
-    "project_name"
+        "id",
+        "project_name",
+        "team_id",
+        "team__team_name"
     )
 
-    return Response(list(projects))
+    result = [
+        {
+            "id": p["id"],
+            "project_name": p["project_name"],
+            "team": p["team_id"],
+            "team_id": p["team_id"],
+            "team_name": p["team__team_name"],
+        }
+        for p in projects
+    ]
+
+    return Response(result)
 
 
 
@@ -1457,16 +1534,26 @@ def View_Tasks(request):
     query = request.GET.get("search", "").strip()
     filter_date = request.GET.get("date", "").strip()
     filter_status = request.GET.get("status", "").strip()
+    team_filter = request.GET.get("team_id") or request.GET.get("team")
 
     # ==========================================
     # BASE TASK QUERY
     # ==========================================
 
-    if request.user.role == "admin":
+    if request.user.role in ("admin", "super_admin"):
         tasks = Task.objects.filter(
             company=request.user.company
         ).order_by("-id")
-
+        if team_filter and str(team_filter).lower() != "all":
+            tasks = tasks.filter(Q(team_id=team_filter) | Q(project__team_id=team_filter)).distinct()
+    elif request.user.team:
+        tasks = Task.objects.filter(
+            company=request.user.company
+        ).filter(
+            Q(team=request.user.team) |
+            Q(project__team=request.user.team) |
+            Q(assigned_to=request.user)
+        ).distinct().order_by("-id")
     else:
         tasks = Task.objects.filter(
             company=request.user.company,
@@ -1556,8 +1643,18 @@ from django.db.models import Q
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def View_Single_Task(request, task_id):
-    if request.user.role == "admin":
-        task = get_object_or_404(Task,id=task_id,company=request.user.company)
+    if request.user.role in ("admin", "super_admin"):
+        task = get_object_or_404(Task, id=task_id, company=request.user.company)
+    elif request.user.team:
+        task = get_object_or_404(
+            Task.objects.filter(
+                Q(team=request.user.team) |
+                Q(project__team=request.user.team) |
+                Q(assigned_to=request.user)
+            ).distinct(),
+            id=task_id,
+            company=request.user.company
+        )
     else:
         task = get_object_or_404(
             Task,
@@ -1826,10 +1923,23 @@ def total_tasks_summary(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def admin_tasks_summary(request):
-    # Get all tasks for admin view
-    all_tasks = Task.objects.filter(
-        company=request.user.company
-    )
+    if request.user.role in ("admin", "super_admin"):
+        all_tasks = Task.objects.filter(
+            company=request.user.company
+        )
+    elif request.user.team:
+        all_tasks = Task.objects.filter(
+            company=request.user.company
+        ).filter(
+            Q(team=request.user.team) |
+            Q(project__team=request.user.team) |
+            Q(assigned_to=request.user)
+        ).distinct()
+    else:
+        all_tasks = Task.objects.filter(
+            company=request.user.company,
+            assigned_to=request.user
+        )
 
     total = all_tasks.count()
     todo = all_tasks.filter(status__iexact="To Do").count()
@@ -2591,43 +2701,57 @@ def View_Single_Employee_Productivity(request, user_id):
     # ==========================================
 
     if logged_user.role == "admin":
-
-        # Admin can view any employee
+        # Admin can view any employee in their company
         pass
 
-    elif logged_user.role == "project_lead":
+    elif logged_user.role == "project_lead" or Team.objects.filter(company=logged_user.company, team_lead=logged_user).exists():
+        # Project Leads & Team Leads can view themselves and members under their assigned teams or projects
+        if user.id != logged_user.id:
+            # 1. Teams led by this user
+            teams_led = Team.objects.filter(
+                company=logged_user.company,
+                team_lead=logged_user
+            )
+            in_led_team = User.objects.filter(
+                company=logged_user.company,
+                id=user.id,
+                team__in=teams_led
+            ).exists()
 
-        # Projects managed by this Project Lead
-        lead_projects = Project.objects.filter(
-            company=logged_user.company,
-            assigned_to=logged_user
-        )
-
-        # Target employee must have a task
-        # belonging to one of the Project Lead's projects
-        target_has_project = Task.objects.filter(
-            company=logged_user.company,
-            project__in=lead_projects,
-            assigned_to=user
-        ).exists()
-
-        if not target_has_project:
-
-            return Response(
-                {
-                    "detail": "You do not have permission to view this employee."
-                },
-                status=status.HTTP_403_FORBIDDEN
+            # 2. Projects led by this user
+            lead_projects = Project.objects.filter(
+                company=logged_user.company,
+                assigned_to=logged_user
             )
 
+            # Assigned to tasks in projects led by this user
+            in_lead_project_tasks = Task.objects.filter(
+                company=logged_user.company,
+                project__in=lead_projects,
+                assigned_to=user
+            ).exists()
+
+            # Belongs to the team assigned to projects led by this user
+            in_lead_project_team = User.objects.filter(
+                company=logged_user.company,
+                id=user.id,
+                team__in=lead_projects.filter(team__isnull=False).values_list("team_id", flat=True)
+            ).exists()
+
+            if not (in_led_team or in_lead_project_tasks or in_lead_project_team):
+                return Response(
+                    {
+                        "detail": "You do not have permission to view this employee's productivity."
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
     else:
-
-        # Normal employee can only view themselves
+        # Normal employee can only view their own productivity
         if user.id != logged_user.id:
-
             return Response(
                 {
-                    "detail": "You do not have permission to view this employee."
+                    "detail": "You do not have permission to view other employees' productivity."
                 },
                 status=status.HTTP_403_FORBIDDEN
             )
@@ -2725,7 +2849,12 @@ def View_Single_Employee_Productivity(request, user_id):
     for idle in idles:
         if idle.duration:
             idle_seconds += idle.duration.total_seconds()
+        elif idle.idle_end_time:
+            idle_seconds += max(0, (idle.idle_end_time - idle.idle_start_time).total_seconds())
+        elif idle.idle_start_time:
+            idle_seconds += max(0, (timezone.now() - idle.idle_start_time).total_seconds())
 
+    net_session_seconds = max(0, session_seconds - idle_seconds)
     total_base_seconds = max(session_seconds, today_task_seconds)
 
     if total_base_seconds > 0:
@@ -2868,14 +2997,25 @@ def View_Single_Employee_Productivity(request, user_id):
         ).order_by("-captured_at")
 
         for s in scr:
+            s_img_url = None
+            if s.image:
+                raw_img = str(s.image)
+                if raw_img.startswith("http://") or raw_img.startswith("https://"):
+                    s_img_url = raw_img
+                else:
+                    try:
+                        import cloudinary.utils
+                        s_img_url, _ = cloudinary.utils.cloudinary_url(
+                            raw_img.lstrip("/"),
+                            resource_type="image",
+                            secure=True
+                        )
+                    except Exception:
+                        s_img_url = getattr(s.image, "url", raw_img)
 
             screenshot_list.append({
                 "id": s.id,
-                "image": (
-                    s.image.url
-                    if s.image
-                    else None
-                ),
+                "image": s_img_url,
                 "captured_at": s.captured_at,
                 "reason": s.reason,
             })
@@ -2892,7 +3032,10 @@ def View_Single_Employee_Productivity(request, user_id):
 
             website_list.append({
                 "id": w.id,
-                "url": w.website_url,
+                "url": w.website,
+                "website": w.website,
+                "page_title": w.page_title,
+                "browser_name": w.browser_name,
                 "start_time": w.start_time,
                 "end_time": w.end_time,
                 "duration": (
@@ -3024,8 +3167,7 @@ def View_Employees_Productivity(request):
     # ==========================================
 
     if logged_user.role == "admin":
-
-        # Admin → all employees and project leads
+        # Admin → all active employees and project leads
         users = User.objects.filter(
             company=company,
             is_active=True
@@ -3033,32 +3175,48 @@ def View_Employees_Productivity(request):
             role="admin"
         )
 
-    elif logged_user.role == "project_lead":
-
-        # Projects handled by this project lead
+    elif logged_user.role == "project_lead" or Team.objects.filter(company=company, team_lead=logged_user).exists():
+        # Project Leads & Team Leads → members under their assigned teams or projects (plus themselves)
+        teams_led = Team.objects.filter(
+            company=company,
+            team_lead=logged_user
+        )
         lead_projects = Project.objects.filter(
             company=company,
             assigned_to=logged_user
         )
 
-        # Users assigned to tasks in those projects
-        user_ids = Task.objects.filter(
+        # 1. Users in teams led by this user
+        team_user_ids = User.objects.filter(
+            company=company,
+            team__in=teams_led
+        ).values_list("id", flat=True)
+
+        # 2. Users assigned to tasks in projects led by this user
+        task_user_ids = Task.objects.filter(
             company=company,
             project__in=lead_projects
         ).values_list(
             "assigned_to__id",
             flat=True
-        ).distinct()
+        )
+
+        # 3. Users in teams assigned to projects led by this user
+        proj_team_user_ids = User.objects.filter(
+            company=company,
+            team__in=lead_projects.filter(team__isnull=False).values_list("team_id", flat=True)
+        ).values_list("id", flat=True)
+
+        accessible_ids = set(team_user_ids) | set(task_user_ids) | set(proj_team_user_ids) | {logged_user.id}
 
         users = User.objects.filter(
             company=company,
             is_active=True,
-            id__in=user_ids
+            id__in=accessible_ids
         )
 
     else:
-
-        # Employee → only themselves
+        # Regular Employee → only themselves
         users = User.objects.filter(
             id=logged_user.id,
             company=company,
@@ -3208,8 +3366,16 @@ def kanban_tasks(request):
     user_id = request.GET.get("user")
     status_filter = request.GET.get("status")
 
-    if request.user.role == "admin":
+    if request.user.role in ("admin", "super_admin"):
         tasks = Task.objects.filter(company=request.user.company).prefetch_related("assigned_to")
+    elif request.user.team:
+        tasks = Task.objects.filter(
+            company=request.user.company
+        ).filter(
+            Q(team=request.user.team) |
+            Q(project__team=request.user.team) |
+            Q(assigned_to=request.user)
+        ).distinct().prefetch_related("assigned_to")
     else:
         tasks = Task.objects.filter(
             company=request.user.company,
@@ -3217,7 +3383,7 @@ def kanban_tasks(request):
         ).prefetch_related("assigned_to")
 
     # Filter by assigned user
-    if user_id and request.user.role == "admin":
+    if user_id and request.user.role in ("admin", "super_admin"):
         tasks = tasks.filter(
             assigned_to__id=user_id
         )
@@ -3559,7 +3725,39 @@ from rest_framework.response import Response
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_notifications(request):
-    notifications = Notification.objects.filter(company=request.user.company,user=request.user).order_by("-created_at")
+    logged_user = request.user
+    company = logged_user.company
+
+    if logged_user.role == "admin":
+        # Admin can view all notifications across the company
+        notifications = Notification.objects.filter(
+            company=company
+        ).select_related("user").order_by("-created_at")
+    elif logged_user.role == "project_lead" or Team.objects.filter(company=company, team_lead=logged_user).exists():
+        # Project Leads & Team Leads: notifications addressed to them + assigned team members / projects
+        teams_led = Team.objects.filter(company=company, team_lead=logged_user)
+        lead_projects = Project.objects.filter(company=company, assigned_to=logged_user)
+
+        team_user_ids = User.objects.filter(company=company, team__in=teams_led).values_list("id", flat=True)
+        task_user_ids = Task.objects.filter(company=company, project__in=lead_projects).values_list("assigned_to__id", flat=True)
+        proj_team_user_ids = User.objects.filter(
+            company=company,
+            team__in=lead_projects.filter(team__isnull=False).values_list("team_id", flat=True)
+        ).values_list("id", flat=True)
+
+        accessible_ids = set(team_user_ids) | set(task_user_ids) | set(proj_team_user_ids) | {logged_user.id}
+
+        notifications = Notification.objects.filter(
+            company=company,
+            user__id__in=accessible_ids
+        ).select_related("user").order_by("-created_at")
+    else:
+        # Regular Employees: strictly their own notifications
+        notifications = Notification.objects.filter(
+            company=company,
+            user=logged_user
+        ).select_related("user").order_by("-created_at")
+
     serializer = NotificationSerializer(notifications, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -3569,19 +3767,24 @@ def user_notifications(request):
 def mark_notification_read(request, id):
     notification = Notification.objects.filter(
         id=id,
-        user=request.user
-    ).first()
+        company=request.user.company
+    )
 
-    if not notification:
+    if request.user.role != "admin":
+        notification = notification.filter(user=request.user)
+
+    target_notif = notification.first()
+
+    if not target_notif:
         return Response(
             {"error": "Notification not found"},
             status=status.HTTP_404_NOT_FOUND
         )
 
-    notification.is_read = True
-    notification.save(update_fields=["is_read"])
+    target_notif.is_read = True
+    target_notif.save(update_fields=["is_read"])
 
-    serializer = NotificationSerializer(notification)
+    serializer = NotificationSerializer(target_notif)
 
     return Response(
         {
@@ -3596,12 +3799,12 @@ def mark_notification_read(request, id):
 @api_view(["PUT", "PATCH", "POST"])
 @permission_classes([IsAuthenticated])
 def mark_all_notifications_read(request):
-    Notification.objects.filter(
+    notifs = Notification.objects.filter(
+        company=request.user.company,
         user=request.user,
         is_read=False
-    ).update(
-        is_read=True
     )
+    notifs.update(is_read=True)
 
     return Response(
         {
@@ -3611,19 +3814,37 @@ def mark_all_notifications_read(request):
         status=status.HTTP_200_OK
     )
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def unread_notification_count(request):
+    logged_user = request.user
+    company = logged_user.company
 
+    # Total unread notifications for this user
     unread_count = Notification.objects.filter(
-        company=request.user.company,
-        user=request.user,
+        company=company,
+        user=logged_user,
         is_read=False
+    ).count()
+
+    # Unread leave-related notifications for this user
+    leave_unread_count = Notification.objects.filter(
+        company=company,
+        user=logged_user,
+        is_read=False,
+        notification_type__in=[
+            "leave_request",
+            "leave_approved",
+            "leave_rejected",
+            "leave_cancelled"
+        ]
     ).count()
 
     return Response(
         {
-            "unread_count": unread_count
+            "unread_count": unread_count,
+            "leave_unread_count": leave_unread_count
         },
         status=status.HTTP_200_OK
     )
@@ -3655,11 +3876,14 @@ def delete_notification(request, id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def all_screenshots(request):
-    screenshots = Screenshot.objects.filter(company=request.user.company).select_related(
-        "user",
-        "work_session"
-    )
+    import cloudinary.utils
 
+    screenshots = Screenshot.objects.filter(
+        company=request.user.company
+    ).select_related("user", "work_session")
+
+    # Only admins can view all employees' screenshots.
+    # Employees and project leads can only view their own.
     if request.user.role != "admin":
         screenshots = screenshots.filter(user=request.user)
 
@@ -3672,7 +3896,8 @@ def all_screenshots(request):
             work_session__work_date=date
         )
 
-    if user_id:
+    # Admins may filter by a specific employee; non-admins ignore this param
+    if user_id and request.user.role == "admin":
         screenshots = screenshots.filter(
             user__id=user_id
         )
@@ -3681,15 +3906,33 @@ def all_screenshots(request):
         screenshots = screenshots.filter(
             reason=reason
         )
+
     screenshots = screenshots.order_by("-captured_at")
     data = []
 
     for screenshot in screenshots:
+        # Build full Cloudinary HTTPS URL from the stored public_id/field.
+        # CloudinaryField.url only returns the public_id path for some configs;
+        # using cloudinary.utils.cloudinary_url ensures a proper https URL.
+        image_url = None
+        if screenshot.image:
+            raw = str(screenshot.image)
+            if raw.startswith("http://") or raw.startswith("https://"):
+                image_url = raw
+            else:
+                # raw is either a public_id or a relative path
+                public_id = raw.lstrip("/")
+                image_url, _ = cloudinary.utils.cloudinary_url(
+                    public_id,
+                    resource_type="image",
+                    secure=True,
+                )
+
         data.append({
             "id": screenshot.id,
-            "employee_name": screenshot.user.get_full_name(),
+            "employee_name": screenshot.user.get_full_name() or screenshot.user.email,
             "email": screenshot.user.email,
-            "image": screenshot.image.url if screenshot.image else None,
+            "image": image_url,
             "reason": screenshot.reason,
             "captured_at": screenshot.captured_at,
             "work_date": screenshot.work_session.work_date,
@@ -3704,12 +3947,12 @@ def attendance_list(request):
     """
     Returns attendance summary cards (Present, Absent, Late, On Leave) and log details.
     Role-based permissions:
-    - Admin: sees company-wide employee attendance
-    - User/Employee: sees their own attendance log & status
+    - Admin / Super Admin: sees company-wide employee attendance
+    - Employee / Team Lead: sees their team's attendance (or own if no team)
     """
     user = request.user
     company = user.company
-    is_admin = user.role in ["admin", "project_lead"]
+    is_admin = user.role in ["admin", "super_admin"]
 
     date_str = request.GET.get("date")
     if date_str:
@@ -3725,11 +3968,16 @@ def attendance_list(request):
     user_id_filter = request.GET.get("user_id") or request.GET.get("user")
 
     # Fetch users
-    users_qs = User.objects.filter(company=company, is_active=True)
-    if not is_admin:
-        users_qs = users_qs.filter(id=user.id)
-    elif user_id_filter:
-        users_qs = users_qs.filter(id=user_id_filter)
+    if is_admin:
+        users_qs = User.objects.filter(company=company, is_active=True).exclude(role="admin")
+        if user_id_filter:
+            users_qs = users_qs.filter(id=user_id_filter)
+    elif user.team:
+        users_qs = User.objects.filter(company=company, team=user.team, is_active=True).exclude(role="admin")
+        if user_id_filter:
+            users_qs = users_qs.filter(id=user_id_filter)
+    else:
+        users_qs = User.objects.filter(id=user.id, company=company, is_active=True)
 
     if branch_filter and branch_filter not in ["All Branches", "All"]:
         users_qs = users_qs.filter(
@@ -3773,6 +4021,8 @@ def attendance_list(request):
         check_in_str = "-"
         check_out_str = "-"
         duration_str = "-"
+        break_str = "0h 0m"
+        break_sec = 0
         status_val = "Absent"
 
         if is_on_leave:
@@ -3794,22 +4044,37 @@ def attendance_list(request):
                 status_val = "Present"
                 present_count += 1
 
+            break_sec = 0
+            break_str = "0h 0m"
+            idles = IdleSession.objects.filter(work_session=session)
+            for idle in idles:
+                if idle.duration:
+                    break_sec += int(idle.duration.total_seconds())
+                elif idle.idle_end_time:
+                    break_sec += max(0, int((idle.idle_end_time - idle.idle_start_time).total_seconds()))
+                elif not idle.idle_end_time and not session.clock_out:
+                    break_sec += max(0, int((timezone.now() - idle.idle_start_time).total_seconds()))
+
+            b_hours = max(0, break_sec // 3600)
+            b_mins = max(0, (break_sec % 3600) // 60)
+            break_str = f"{b_hours}h {b_mins}m"
+
             if session.clock_out:
                 check_out_dt = timezone.localtime(session.clock_out)
                 check_out_str = check_out_dt.strftime("%H:%M")
-                
                 dur_seconds = int((session.clock_out - session.clock_in).total_seconds())
-                hours = max(0, dur_seconds // 3600)
-                mins = max(0, (dur_seconds % 3600) // 60)
-                duration_str = f"{hours}h {mins}m"
             else:
                 dur_seconds = int((timezone.now() - session.clock_in).total_seconds())
-                hours = max(0, dur_seconds // 3600)
-                mins = max(0, (dur_seconds % 3600) // 60)
-                duration_str = f"{hours}h {mins}m"
+
+            net_dur_seconds = max(0, dur_seconds - break_sec)
+            hours = max(0, net_dur_seconds // 3600)
+            mins = max(0, (net_dur_seconds % 3600) // 60)
+            duration_str = f"{hours}h {mins}m"
         else:
             status_val = "Absent"
             absent_count += 1
+            break_str = "0h 0m"
+            break_sec = 0
 
         if status_filter and status_filter != "All" and status_val.lower() != status_filter.lower():
             continue
@@ -3833,6 +4098,8 @@ def attendance_list(request):
             "check_in": check_in_str,
             "check_out": check_out_str,
             "duration": duration_str,
+            "break_time": break_str,
+            "break_seconds": break_sec,
             "status": status_val,
             "work_date": str(target_date)
         })
@@ -3865,8 +4132,16 @@ def attendance_calendar(request):
     year = int(request.GET.get("year", timezone.localdate().year))
     target_user_id = request.GET.get("user_id")
 
-    if not is_admin or not target_user_id:
-        target_user_id = user.id
+    if not is_admin:
+        if target_user_id:
+            if str(target_user_id) != str(user.id):
+                if user.team:
+                    if not User.objects.filter(id=target_user_id, company=company, team=user.team).exists():
+                        target_user_id = user.id
+                else:
+                    target_user_id = user.id
+        else:
+            target_user_id = user.id
 
     num_days = calendar.monthrange(year, month)[1]
     days_data = {}
@@ -3937,6 +4212,8 @@ def attendance_corrections(request):
     if request.method == "GET":
         if is_admin:
             corrections = AttendanceCorrection.objects.filter(company=company).select_related("user", "approved_by")
+        elif user.team:
+            corrections = AttendanceCorrection.objects.filter(company=company, user__team=user.team).select_related("user", "approved_by")
         else:
             corrections = AttendanceCorrection.objects.filter(company=company, user=user).select_related("user", "approved_by")
         serializer = AttendanceCorrectionSerializer(corrections, many=True)
@@ -3956,7 +4233,7 @@ def attendance_corrections(request):
 def attendance_correction_action(request, pk):
     """
     Action on attendance correction:
-    - Admin: approve or reject
+    - Admin / Project Lead: approve or reject
     """
     user = request.user
     is_admin_or_project_lead = user.role in [
@@ -3964,8 +4241,8 @@ def attendance_correction_action(request, pk):
         "super_admin",
         "project_lead",
     ]
-    if not is_admin:
-        return Response({"error": "Only admins can approve or reject attendance corrections."}, status=status.HTTP_403_FORBIDDEN)
+    if not is_admin_or_project_lead:
+        return Response({"error": "Only admins and project leads can approve or reject attendance corrections."}, status=status.HTTP_403_FORBIDDEN)
 
     correction = get_object_or_404(AttendanceCorrection, pk=pk, company=user.company)
     action = request.data.get("action")
@@ -4265,7 +4542,9 @@ def all_reports(request):
                 if idle.duration:
                     break_seconds += int(idle.duration.total_seconds())
                 elif idle.idle_end_time:
-                    break_seconds += int((idle.idle_end_time - idle.idle_start_time).total_seconds())
+                    break_seconds += max(0, int((idle.idle_end_time - idle.idle_start_time).total_seconds()))
+                elif not idle.idle_end_time and (not session or not session.clock_out):
+                    break_seconds += max(0, int((timezone.now() - idle.idle_start_time).total_seconds()))
 
         # Task Time details
         u_tasks = task_time_map.get(u.id, [])
@@ -4273,23 +4552,25 @@ def all_reports(request):
             if tt.duration:
                 task_seconds += int(tt.duration.total_seconds())
             elif tt.end_time:
-                task_seconds += int((tt.end_time - tt.start_time).total_seconds())
+                task_seconds += max(0, int((tt.end_time - tt.start_time).total_seconds()))
             elif tt.start_time:
-                task_seconds += int((timezone.now() - tt.start_time).total_seconds())
+                task_seconds += max(0, int((timezone.now() - tt.start_time).total_seconds()))
 
         # Format row strings
-        b_mins = max(0, break_seconds // 60)
-        total_break_str = f"{b_mins} min"
+        b_hours = max(0, break_seconds // 3600)
+        b_mins = max(0, (break_seconds % 3600) // 60)
+        total_break_str = f"{b_hours}h {b_mins}min" if b_hours > 0 else f"{b_mins} min"
 
         t_hours = max(0, task_seconds // 3600)
         t_mins = max(0, (task_seconds % 3600) // 60)
         task_time_str = f"{t_hours}h {t_mins}min" if t_hours > 0 else f"{t_mins}min"
 
-        w_hours = max(0, work_seconds // 3600)
-        w_mins = max(0, (work_seconds % 3600) // 60)
+        net_work_seconds = max(0, work_seconds - break_seconds)
+        w_hours = max(0, net_work_seconds // 3600)
+        w_mins = max(0, (net_work_seconds % 3600) // 60)
         total_hours_str = f"{w_hours:02d}h {w_mins:02d}min"
 
-        total_work_seconds_all += work_seconds
+        total_work_seconds_all += net_work_seconds
         total_break_seconds_all += break_seconds
         total_task_seconds_all += task_seconds
 
@@ -4721,12 +5002,23 @@ import traceback
 @permission_classes([IsAdminOrProjectLead])
 def export_employees_excel(request):
     try:
-        if request.user.company:
+        team_id = request.query_params.get("team_id") or request.query_params.get("team")
+        if request.user.role in ("admin", "super_admin"):
             employees = User.objects.filter(
                 company=request.user.company
             ).order_by("id")
+            if team_id and str(team_id).lower() != "all":
+                employees = employees.filter(team_id=team_id)
+        elif request.user.team:
+            employees = User.objects.filter(
+                company=request.user.company,
+                team=request.user.team
+            ).order_by("id")
         else:
-            employees = User.objects.all().order_by("id")
+            employees = User.objects.filter(
+                id=request.user.id,
+                company=request.user.company
+            ).order_by("id")
 
         headers = [
             "ID",
@@ -4767,12 +5059,23 @@ def export_employees_excel(request):
 @permission_classes([IsAdminOrProjectLead])
 def export_employees_pdf(request):
 
-    if request.user.company:
+    team_id = request.query_params.get("team_id") or request.query_params.get("team")
+    if request.user.role in ("admin", "super_admin"):
         employees = User.objects.filter(
             company=request.user.company
         ).order_by("id")
+        if team_id and str(team_id).lower() != "all":
+            employees = employees.filter(team_id=team_id)
+    elif request.user.team:
+        employees = User.objects.filter(
+            company=request.user.company,
+            team=request.user.team
+        ).order_by("id")
     else:
-        employees = User.objects.all().order_by("id")
+        employees = User.objects.filter(
+            id=request.user.id,
+            company=request.user.company
+        ).order_by("id")
 
     headers = [
         "ID",
@@ -5473,14 +5776,8 @@ def company_smtp_settings(request):
     return Response(serializer.errors, status=400)
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def create_leave_policy(request):
-
-    if request.user.role != "admin":
-        return Response(
-            {"error": "Only admin can create leave policies."},
-            status=status.HTTP_403_FORBIDDEN
-        )
 
     serializer = LeavePolicySerializer(data=request.data)
 
@@ -5545,14 +5842,8 @@ def view_leave_policy(request, policy_id):
 
     return Response(serializer.data)
 @api_view(["PUT"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def update_leave_policy(request, policy_id):
-
-    if request.user.role != "admin":
-        return Response(
-            {"error": "Only admin can update leave policies."},
-            status=status.HTTP_403_FORBIDDEN
-        )
 
     try:
         policy = LeavePolicy.objects.get(
@@ -5585,14 +5876,8 @@ def update_leave_policy(request, policy_id):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(["DELETE"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsAdminRole])
 def delete_leave_policy(request, policy_id):
-
-    if request.user.role != "admin":
-        return Response(
-            {"error": "Only admin can delete leave policies."},
-            status=status.HTTP_403_FORBIDDEN
-        )
 
     try:
         policy = LeavePolicy.objects.get(
@@ -5720,19 +6005,28 @@ def create_team(request):
 @permission_classes([IsAuthenticated])
 def view_teams(request):
 
-    teams = Team.objects.filter(
-        company=request.user.company
-    ).order_by("team_name")
+    if request.user.role in ("admin", "super_admin"):
+        teams = Team.objects.filter(
+            company=request.user.company
+        ).order_by("team_name")
+    else:
+        if request.user.team:
+            teams = Team.objects.filter(
+                id=request.user.team.id,
+                company=request.user.company
+            )
+        else:
+            teams = Team.objects.none()
 
     serializer = TeamSerializer(teams, many=True)
 
     return Response(
-    {
-        "message": "Teams retrieved successfully.",
-        "data": serializer.data
-    },
-    status=status.HTTP_200_OK
-)
+        {
+            "message": "Teams retrieved successfully.",
+            "data": serializer.data
+        },
+        status=status.HTTP_200_OK
+    )
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -5750,15 +6044,22 @@ def view_team(request, team_id):
             status=status.HTTP_404_NOT_FOUND
         )
 
+    if request.user.role not in ("admin", "super_admin"):
+        if not request.user.team or request.user.team.id != team.id:
+            return Response(
+                {"error": "You do not have permission to view this team."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
     serializer = TeamSerializer(team)
 
     return Response(
-    {
-        "message": "Team retrieved successfully.",
-        "data": serializer.data
-    },
-    status=status.HTTP_200_OK
-)
+        {
+            "message": "Team retrieved successfully.",
+            "data": serializer.data
+        },
+        status=status.HTTP_200_OK
+    )
 
 @api_view(["PUT"])
 @permission_classes([IsAuthenticated,IsAdminRole])
@@ -5903,6 +6204,27 @@ def delete_team(request, team_id):
     return Response(
         {
             "message": "Team deleted successfully."
+        },
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def active_teams(request):
+    
+    user_company = request.user.company
+    teams = Team.objects.filter(
+        company=user_company,
+        status__iexact="active"
+    ).order_by("team_name")
+
+    serializer = TeamSerializer(teams, many=True)
+
+    return Response(
+        {
+            "message": "Active teams retrieved successfully.",
+            "data": serializer.data
         },
         status=status.HTTP_200_OK
     )
@@ -6149,3 +6471,497 @@ def global_search(request):
         "tasks": task_data,
         "teams": team_data
     })
+
+
+from rest_framework.renderers import BaseRenderer, JSONRenderer, BrowsableAPIRenderer
+from rest_framework.decorators import renderer_classes
+
+
+class ProductivityPDFRenderer(BaseRenderer):
+    media_type = "application/pdf"
+    format = "pdf"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class ProductivityExcelRenderer(BaseRenderer):
+    media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    format = "excel"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@renderer_classes([JSONRenderer, BrowsableAPIRenderer, ProductivityPDFRenderer, ProductivityExcelRenderer])
+def export_employee_productivity(
+    request,
+    user_id
+):
+
+    logged_user = request.user
+    company = logged_user.company
+
+    # =====================================================
+    # EMPLOYEE
+    # =====================================================
+
+    employee = get_object_or_404(
+        User,
+        id=user_id,
+        company=company,
+        is_active=True
+    )
+
+    # =====================================================
+    # RBAC
+    # =====================================================
+
+    if logged_user.role == "admin":
+
+        allowed = True
+
+    elif logged_user.id == employee.id:
+
+        allowed = True
+
+    else:
+
+        allowed = False
+
+        # Teams led by current user
+        teams_led = Team.objects.filter(
+            company=company,
+            team_lead=logged_user
+        )
+
+        if User.objects.filter(
+            company=company,
+            id=employee.id,
+            team__in=teams_led
+        ).exists():
+
+            allowed = True
+
+        # Projects led by current user
+        if not allowed:
+
+            lead_projects = Project.objects.filter(
+                company=company,
+                assigned_to=logged_user
+            )
+
+            if Task.objects.filter(
+                company=company,
+                project__in=lead_projects,
+                assigned_to=employee
+            ).exists():
+
+                allowed = True
+
+        # Project team
+        if not allowed:
+
+            lead_projects = Project.objects.filter(
+                company=company,
+                assigned_to=logged_user,
+                team__isnull=False
+            )
+
+            team_ids = lead_projects.values_list(
+                "team_id",
+                flat=True
+            )
+
+            if User.objects.filter(
+                company=company,
+                id=employee.id,
+                team__in=team_ids
+            ).exists():
+
+                allowed = True
+
+    if not allowed:
+
+        return Response(
+            {
+                "detail":
+                "You do not have permission "
+                "to export this employee's "
+                "productivity."
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    # =====================================================
+    # PARAMETERS
+    # =====================================================
+
+    period = (
+        request.GET.get("period")
+        or "daily"
+    ).lower()
+
+    export_format = (
+        request.GET.get("format")
+        or request.GET.get("export_format")
+        or request.GET.get("file_format")
+        or "excel"
+    ).lower()
+
+    date_str = request.GET.get(
+        "date"
+    )
+
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
+    if period not in (
+        "daily",
+        "weekly",
+        "monthly"
+    ):
+
+        return Response(
+            {
+                "detail":
+                "Invalid period. "
+                "Use daily, weekly or monthly."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if export_format not in (
+        "excel",
+        "pdf"
+    ):
+
+        return Response(
+            {
+                "detail":
+                "Invalid format. "
+                "Use excel or pdf."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # =====================================================
+    # SELECTED DATE
+    # =====================================================
+
+    if date_str:
+
+        try:
+
+            selected_date = datetime.strptime(
+                date_str,
+                "%Y-%m-%d"
+            ).date()
+
+        except ValueError:
+
+            return Response(
+                {
+                    "detail":
+                    "Invalid date. "
+                    "Use YYYY-MM-DD."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    else:
+
+        selected_date = timezone.localdate()
+
+    # =====================================================
+    # DATE RANGE
+    # =====================================================
+
+    start_date, end_date = (
+        get_report_date_range(
+            period,
+            selected_date
+        )
+    )
+
+    # =====================================================
+    # BUILD DATA
+    # =====================================================
+
+    report_data = (
+        build_productivity_data(
+            employee=employee,
+            company=company,
+            start_date=start_date,
+            end_date=end_date
+        )
+    )
+
+    # =====================================================
+    # FILENAME
+    # =====================================================
+
+    employee_name = (
+        employee.get_full_name()
+        or employee.username
+        or employee.email
+    )
+
+    safe_name = "".join(
+        character
+        if character.isalnum()
+        else "_"
+        for character in employee_name
+    )
+
+    filename = (
+        f"{safe_name}_"
+        f"productivity_"
+        f"{period}_"
+        f"{start_date}_"
+        f"{end_date}"
+    )
+
+    # =====================================================
+    # EXPORT
+    # =====================================================
+
+    if export_format == "excel":
+
+        return generate_productivity_excel(
+            report_data,
+            filename
+        )
+
+    return generate_productivity_pdf(
+        report_data,
+        filename
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def team_details(request, team_id):
+
+    company = request.user.company
+
+    team = get_object_or_404(
+        Team,
+        id=team_id,
+        company=company
+    )
+
+    if request.user.role not in ("admin", "super_admin"):
+        if not request.user.team or request.user.team.id != team.id:
+            return Response(
+                {"error": "You do not have permission to view details for this team."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    # ==========================================
+    # MEMBERS
+    # ==========================================
+
+    members = User.objects.filter(
+        company=company,
+        team=team,
+        is_active=True
+    ).exclude(
+        id=team.team_lead.id if team.team_lead else None
+    )
+
+    member_data = []
+
+    for member in members:
+
+        full_name = (
+            f"{member.first_name} {member.last_name}"
+        ).strip()
+
+        name = (
+            full_name
+            or member.username
+            or member.email
+        )
+
+        profile_picture = None
+
+        if member.profile_picture:
+
+            try:
+                profile_picture = member.profile_picture.url
+            except Exception:
+                profile_picture = str(
+                    member.profile_picture
+                )
+
+        member_data.append({
+            "id": member.id,
+            "name": name,
+            "email": member.email,
+            "role": member.role,
+            "profile_picture": (
+                profile_picture
+                or "/employee pic.svg"
+            )
+        })
+
+    # ==========================================
+    # PROJECTS
+    # ==========================================
+
+    projects = Project.objects.filter(
+        company=company,
+        team=team
+    ).order_by("-id")
+
+    project_data = []
+
+    for project in projects:
+
+        tasks = Task.objects.filter(
+            company=company,
+            project=project
+        )
+
+        total_tasks = tasks.count()
+
+        completed_tasks = tasks.filter(
+            status__iexact="Completed"
+        ).count()
+
+        project_data.append({
+            "id": project.id,
+            "project_name": project.project_name,
+            "description": project.description,
+            "due_date": project.due_date,
+            "total_tasks": total_tasks,
+            "completed_tasks": completed_tasks,
+            "pending_tasks": (
+                total_tasks - completed_tasks
+            )
+        })
+
+    # ==========================================
+    # TASKS
+    # ==========================================
+
+    tasks = Task.objects.filter(
+        company=company,
+        project__team=team
+    ).distinct().order_by("-id")
+
+    task_data = []
+
+    for task in tasks:
+
+        assigned_users = []
+
+        for employee in task.assigned_to.all():
+
+            full_name = (
+                f"{employee.first_name} "
+                f"{employee.last_name}"
+            ).strip()
+
+            assigned_users.append({
+                "id": employee.id,
+                "name": (
+                    full_name
+                    or employee.username
+                    or employee.email
+                )
+            })
+
+        task_data.append({
+            "id": task.id,
+            "task_name": task.task_name,
+            "status": task.status,
+            "priority": task.priority,
+            "due_date": task.due_date,
+            "project_name": (
+                task.project.project_name
+                if task.project
+                else None
+            ),
+            "assigned_to": assigned_users
+        })
+
+    # ==========================================
+    # TEAM LEAD
+    # ==========================================
+
+    team_lead = None
+
+    if team.team_lead:
+
+        lead = team.team_lead
+
+        full_name = (
+            f"{lead.first_name} {lead.last_name}"
+        ).strip()
+
+        profile_picture = None
+
+        if lead.profile_picture:
+            try:
+                profile_picture = lead.profile_picture.url
+            except Exception:
+                profile_picture = str(lead.profile_picture)
+
+        team_lead = {
+            "id": lead.id,
+            "name": (
+                full_name
+                or lead.username
+                or lead.email
+            ),
+            "email": lead.email,
+            "profile_picture": (
+                profile_picture
+                or "/employee pic.svg"
+            )
+        }
+
+    # ==========================================
+    # COUNTS
+    # ==========================================
+
+    total_tasks = len(task_data)
+
+    completed_tasks = sum(
+        1
+        for task in task_data
+        if str(task["status"]).lower() == "completed"
+    )
+
+    return Response({
+
+        "team": {
+            "id": team.id,
+            "team_name": team.team_name,
+            "description": team.description,
+            "status": team.status,
+            "team_lead": team_lead
+        },
+
+        "summary": {
+            "members": len(member_data),
+            "projects": len(project_data),
+            "tasks": total_tasks,
+            "completed_tasks": completed_tasks,
+            "pending_tasks": (
+                total_tasks - completed_tasks
+            )
+        },
+
+        "members": member_data,
+
+        "projects": project_data,
+
+        "tasks": task_data
+
+    }, status=status.HTTP_200_OK)

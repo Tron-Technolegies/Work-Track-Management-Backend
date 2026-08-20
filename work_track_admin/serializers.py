@@ -1,6 +1,22 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import MonitoringSettings, Screenshot, Task, Project, Notification, TaskTime ,Company, LeavePolicy,WorkSession,ApplicationUsage,Team, AttendanceCorrection, SecuritySettings
+from django.utils import timezone
+from .models import (
+    MonitoringSettings,
+    Screenshot,
+    Task,
+    Project,
+    Notification,
+    TaskTime,
+    Company,
+    LeavePolicy,
+    WorkSession,
+    IdleSession,
+    ApplicationUsage,
+    Team,
+    AttendanceCorrection,
+    SecuritySettings,
+)
 
 User = get_user_model()
 
@@ -207,7 +223,12 @@ class TaskTimeSerializer(serializers.ModelSerializer):
 
 
 class WorkSessionSerializer(serializers.ModelSerializer):
-    
+    break_seconds = serializers.SerializerMethodField()
+    break_time = serializers.SerializerMethodField()
+    net_work_seconds = serializers.SerializerMethodField()
+    net_work_time = serializers.SerializerMethodField()
+    is_on_break = serializers.SerializerMethodField()
+
     class Meta:
         model = WorkSession
         exclude = ["company"]
@@ -220,12 +241,79 @@ class WorkSessionSerializer(serializers.ModelSerializer):
             "created_at",
         )
 
+    def get_break_seconds(self, obj):
+        idles = obj.idle_sessions.all()
+        total_sec = 0
+        now = timezone.now()
+        for idle in idles:
+            if idle.duration:
+                total_sec += int(idle.duration.total_seconds())
+            elif idle.idle_end_time:
+                total_sec += max(0, int((idle.idle_end_time - idle.idle_start_time).total_seconds()))
+            elif not idle.idle_end_time and not obj.clock_out:
+                total_sec += max(0, int((now - idle.idle_start_time).total_seconds()))
+        return total_sec
+
+    def get_break_time(self, obj):
+        sec = self.get_break_seconds(obj)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        return f"{h:02d}h {m:02d}m"
+
+    def get_net_work_seconds(self, obj):
+        now = timezone.now()
+        if obj.clock_out:
+            total_sec = int(obj.total_work_time.total_seconds()) if obj.total_work_time else int((obj.clock_out - obj.clock_in).total_seconds())
+        else:
+            total_sec = max(0, int((now - obj.clock_in).total_seconds()))
+        break_sec = self.get_break_seconds(obj)
+        return max(0, total_sec - break_sec)
+
+    def get_net_work_time(self, obj):
+        sec = self.get_net_work_seconds(obj)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        return f"{h:02d}h {m:02d}m"
+
+    def get_is_on_break(self, obj):
+        if obj.clock_out:
+            return False
+        return obj.idle_sessions.filter(idle_end_time__isnull=True).exists()
+
 
 class ScreenshotSerializer(serializers.ModelSerializer):
-    
+    image = serializers.SerializerMethodField()
+    employee_name = serializers.SerializerMethodField()
+    email = serializers.SerializerMethodField()
+
     class Meta:
         model = Screenshot
         exclude = ["company"]
+
+    def get_employee_name(self, obj):
+        if not obj.user:
+            return ""
+        return obj.user.get_full_name() or obj.user.first_name or obj.user.username or obj.user.email
+
+    def get_email(self, obj):
+        return obj.user.email if obj.user else ""
+
+    def get_image(self, obj):
+        if not obj.image:
+            return None
+        raw = str(obj.image)
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        try:
+            import cloudinary.utils
+            url, _ = cloudinary.utils.cloudinary_url(
+                raw.lstrip("/"),
+                resource_type="image",
+                secure=True
+            )
+            return url
+        except Exception:
+            return getattr(obj.image, "url", raw)
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -243,10 +331,10 @@ class MonitoringSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = MonitoringSettings
         exclude = ["company"]
-
-
-from rest_framework import serializers
-from .models import IdleSession
+        extra_kwargs = {
+            "blocked_applications": {"required": False},
+            "screenshot_on_blocked_app": {"required": False},
+        }
 
 
 class IdleSessionSerializer(serializers.ModelSerializer):
@@ -261,6 +349,9 @@ class IdleSessionSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    duration_seconds = serializers.SerializerMethodField()
+    formatted_duration = serializers.SerializerMethodField()
+
     class Meta:
         model = IdleSession
         fields = [
@@ -272,8 +363,26 @@ class IdleSessionSerializer(serializers.ModelSerializer):
             "idle_start_time",
             "idle_end_time",
             "duration",
+            "duration_seconds",
+            "formatted_duration",
             "created_at",
         ]
+
+    def get_duration_seconds(self, obj):
+        if obj.duration:
+            return int(obj.duration.total_seconds())
+        if obj.idle_end_time:
+            return max(0, int((obj.idle_end_time - obj.idle_start_time).total_seconds()))
+        return max(0, int((timezone.now() - obj.idle_start_time).total_seconds()))
+
+    def get_formatted_duration(self, obj):
+        sec = self.get_duration_seconds(obj)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
+        if h > 0:
+            return f"{h:02d}h {m:02d}m"
+        return f"{m:02d}m {s:02d}s"
 
 
 class ApplicationUsageSerializer(serializers.ModelSerializer):

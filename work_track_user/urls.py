@@ -9,6 +9,7 @@ urlpatterns = [
     path("upload-screenshot/",views.upload_screenshot),
     path("my-screenshots/",views.my_screenshots),
     path("monitoring-settings/",views.monitoring_settings,name="monitoring_settings"),
+    path("blocked-apps/",views.blocked_apps,name="blocked_apps"),
     path("start-idle/",views.start_idle,name="start_idle"),
     path("end-idle/",views.end_idle,name="end_idle"),
     path("my-idle-sessions/",views.my_idle_sessions,name="my_idle_sessions"),

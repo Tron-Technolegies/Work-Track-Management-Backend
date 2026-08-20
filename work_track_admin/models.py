@@ -233,13 +233,23 @@ class WorkSession(models.Model):
 
     def stop(self):
         """
-        Close the session and calculate duration.
+        Close the session and calculate duration deducting break/idle time.
         """
         if not self.clock_out:
             self.clock_out = timezone.now()
-            self.total_work_time = (
-                self.clock_out - self.clock_in
+            raw_duration = self.clock_out - self.clock_in
+
+            # Close any running idle sessions
+            for idle in self.idle_sessions.filter(idle_end_time__isnull=True):
+                idle.stop()
+
+            # Calculate total break duration
+            total_break_sec = sum(
+                int(idle.duration.total_seconds()) if idle.duration else 0
+                for idle in self.idle_sessions.all()
             )
+            net_work_sec = max(0, int(raw_duration.total_seconds()) - total_break_sec)
+            self.total_work_time = timedelta(seconds=net_work_sec)
             self.status = "completed"
             self.save(
                 update_fields=[
@@ -260,6 +270,7 @@ class Screenshot(models.Model):
         ("periodic", "Periodic"),
         ("idle", "Idle"),
         ("manual", "Manual"),
+        ("blocked_app", "Blocked App"),
     )
     company = models.ForeignKey(Company,on_delete=models.CASCADE,related_name="screenshots",null=True,blank=True)
 
@@ -340,8 +351,19 @@ class MonitoringSettings(models.Model):
         auto_now=True
     )
     capture_quality = models.PositiveIntegerField(
-        default=70,
+        default=90,
         help_text="Screenshot JPEG quality (1-100)"
+    )
+
+    blocked_applications = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of blocked application names that trigger an immediate screenshot"
+    )
+
+    screenshot_on_blocked_app = models.BooleanField(
+        default=True,
+        help_text="Capture screenshot immediately when a blocked app is detected"
     )
 
     def __str__(self):

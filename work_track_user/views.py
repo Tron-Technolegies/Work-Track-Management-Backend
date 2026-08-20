@@ -27,6 +27,8 @@ from work_track_admin.email_service import send_email_notification
 
 
 
+from work_track_admin.monitor_service import start_monitor_service, trigger_immediate_capture
+
 # Create your views here.
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, IsEmployeeRole])
@@ -40,6 +42,8 @@ def clock_in(request):
     ).first()
 
     if active_session:
+        # Ensure monitor service is active
+        start_monitor_service()
         return Response(
             {
                 "success": False,
@@ -52,6 +56,25 @@ def clock_in(request):
         company=request.user.company,
         user=request.user
     )
+
+    # Automatically start the Python background desktop monitoring service
+    try:
+        start_monitor_service()
+        trigger_immediate_capture(request.user.id, reason="periodic")
+    except Exception as e:
+        print("Monitor service start notice:", e)
+
+    # Create initial application usage record
+    try:
+        ApplicationUsage.objects.create(
+            company=request.user.company,
+            user=request.user,
+            work_session=session,
+            application_name="Work Track Web App",
+            window_title="Work Track User Dashboard"
+        )
+    except Exception:
+        pass
 
     serializer = WorkSessionSerializer(session)
 
@@ -86,19 +109,57 @@ def current_session(request):
     if not session:
         return Response(
             {
-                "clocked_in": False
+                "clocked_in": False,
+                "is_on_break": False,
+                "elapsed_seconds": 0,
+                "working_seconds": 0,
+                "focus_seconds": 0,
+                "break_seconds": 0,
+                "total_session_seconds": 0,
             },
             status=status.HTTP_200_OK
         )
 
-    elapsed = timezone.now() - session.clock_in
+    now = timezone.now()
+    total_session_seconds = max(0, int((now - session.clock_in).total_seconds()))
+
+    # Check for active break/idle session
+    active_idle = IdleSession.objects.filter(
+        company=request.user.company,
+        user=request.user,
+        work_session=session,
+        idle_end_time__isnull=True
+    ).first()
+    is_on_break = active_idle is not None
+
+    # Calculate total break seconds for this work session
+    completed_idles = IdleSession.objects.filter(
+        work_session=session,
+        idle_end_time__isnull=False
+    )
+    completed_break_seconds = sum(
+        int(idle.duration.total_seconds()) if idle.duration else max(0, int((idle.idle_end_time - idle.idle_start_time).total_seconds()))
+        for idle in completed_idles
+    )
+
+    current_active_break_seconds = 0
+    if active_idle:
+        current_active_break_seconds = max(0, int((now - active_idle.idle_start_time).total_seconds()))
+
+    total_break_seconds = completed_break_seconds + current_active_break_seconds
+    working_seconds = max(0, total_session_seconds - total_break_seconds)
 
     serializer = WorkSessionSerializer(session)
 
     return Response(
         {
             "clocked_in": True,
-            "elapsed_seconds": int(elapsed.total_seconds()),
+            "is_on_break": is_on_break,
+            "elapsed_seconds": working_seconds,
+            "working_seconds": working_seconds,
+            "focus_seconds": working_seconds,
+            "break_seconds": total_break_seconds,
+            "total_session_seconds": total_session_seconds,
             "data": serializer.data
         },
         status=status.HTTP_200_OK
@@ -122,6 +183,25 @@ def clock_out(request):
             },
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    # Cleanly stop any running application, website, or idle sessions
+    for app in ApplicationUsage.objects.filter(user=request.user, end_time__isnull=True):
+        try:
+            app.stop()
+        except Exception:
+            pass
+
+    for site in WebsiteUsage.objects.filter(user=request.user, end_time__isnull=True):
+        try:
+            site.stop()
+        except Exception:
+            pass
+
+    for idle in IdleSession.objects.filter(user=request.user, idle_end_time__isnull=True):
+        try:
+            idle.stop()
+        except Exception:
+            pass
 
     session.stop()
 
@@ -174,10 +254,14 @@ def upload_screenshot(request):
 
     if not image:
         return Response(
-            {"error": "Image is required"},
-            status=400
+            {
+                "success": False,
+                "error": "Image is required"
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Check active work session
     session = WorkSession.objects.filter(
         company=request.user.company,
         user=request.user,
@@ -186,48 +270,97 @@ def upload_screenshot(request):
 
     if not session:
         return Response(
-            {"error": "User is not clocked in"},
-            status=400
-        )
-
-    try:
-        if ";base64," in image:
-            format, imgstr = image.split(";base64,")
-        else:
-            imgstr = image
-    except Exception:
-        return Response(
-            {"error": "Invalid image format"},
+            {
+                "success": False,
+                "error": "User is not clocked in"
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    filename = f"{request.user.id}_{timezone.now():%Y%m%d_%H%M%S}.png"
+    # Extract base64 data
+    try:
+        if ";base64," in image:
+            _, imgstr = image.split(";base64,", 1)
+        else:
+            imgstr = image
 
-    screenshot = Screenshot.objects.create(
-        company=request.user.company,
-        user=request.user,
-        work_session=session,
-        reason=reason
-    )
-    screenshot.image.save(filename, ContentFile(base64.b64decode(imgstr)), save=True)
+        image_data = base64.b64decode(imgstr)
 
-    serializer = ScreenshotSerializer(screenshot)
+    except Exception as e:
+        print("Base64 decode error:", e)
 
-    send_notification(
-        company=request.user.company,
-        user=request.user,
-        title="Screenshot Uploaded",
-        message="A new screenshot has been uploaded.",
-        notification_type="screenshot",
-    )
+        return Response(
+            {
+                "success": False,
+                "error": "Invalid image format"
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    return Response(
-        {
-            "success": True,
-            "data": serializer.data
-        },
-        status=201
-    )
+    # Upload to Cloudinary or fallback to storage
+    image_identifier = None
+    try:
+        if CLOUDINARY_AVAILABLE and os.getenv("CLOUDINARY_CLOUD_NAME"):
+            upload_result = cloudinary.uploader.upload(
+                image_data,
+                folder="worktrack/screenshots",
+                public_id=filename,
+                resource_type="image"
+            )
+            image_identifier = upload_result.get("public_id") or upload_result.get("secure_url")
+    except Exception as e:
+        print("Cloudinary upload failed, falling back to direct storage:", e)
+
+    try:
+        if image_identifier:
+            screenshot = Screenshot.objects.create(
+                company=request.user.company,
+                user=request.user,
+                work_session=session,
+                image=image_identifier,
+                reason=reason
+            )
+        else:
+            screenshot = Screenshot(
+                company=request.user.company,
+                user=request.user,
+                work_session=session,
+                reason=reason
+            )
+            screenshot.image.save(f"{filename}.jpg", ContentFile(image_data), save=True)
+
+        serializer = ScreenshotSerializer(screenshot)
+
+        # Notification should not break screenshot upload
+        try:
+            send_notification(
+                company=request.user.company,
+                user=request.user,
+                title="Screenshot Uploaded",
+                message="A new screenshot has been uploaded.",
+                notification_type="screenshot",
+            )
+        except Exception as e:
+            print("Notification failed:", e)
+
+        return Response(
+            {
+                "success": True,
+                "message": "Screenshot uploaded successfully",
+                "data": serializer.data
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+    except Exception as e:
+        print("Failed to save screenshot record:", e)
+        return Response(
+            {
+                "success": False,
+                "error": "Failed to save screenshot record"
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, IsEmployeeRole])
@@ -263,15 +396,29 @@ def monitoring_settings(request):
     serializer = MonitoringSettingsSerializer(settings)
     return Response(serializer.data)
 
-    # if not settings:
-    #     return Response(
-    #         {"error": "Monitoring settings not found"},
-    #         status=status.HTTP_404_NOT_FOUND
-    #     )
 
-    # serializer = MonitoringSettingsSerializer(settings)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def blocked_apps(request):
+    """Return the blocked applications config for the current user's company."""
+    company = request.user.company
+    if not company:
+        return Response({
+            "blocked_applications": [],
+            "screenshot_on_blocked_app": True,
+            "screenshot_interval": 300,
+            "screenshot_enabled": True,
+            "capture_quality": 90,
+        })
 
-    # return Response(serializer.data)
+    settings, _ = MonitoringSettings.objects.get_or_create(company=company)
+    return Response({
+        "blocked_applications": settings.blocked_applications or [],
+        "screenshot_on_blocked_app": settings.screenshot_on_blocked_app,
+        "screenshot_interval": settings.screenshot_interval,
+        "screenshot_enabled": settings.screenshot_enabled,
+        "capture_quality": settings.capture_quality,
+    })
 
 
 @api_view(["POST"])
@@ -294,7 +441,7 @@ def start_idle(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Check if idle session already exists
+    # Check if idle/break session already exists
     idle = IdleSession.objects.filter(
         company=request.user.company,
         user=request.user,
@@ -302,12 +449,14 @@ def start_idle(request):
     ).first()
 
     if idle:
+        serializer = IdleSessionSerializer(idle)
         return Response(
             {
-                "success": False,
-                "message": "Idle session already running."
+                "success": True,
+                "message": "Break session already running.",
+                "data": serializer.data
             },
-            status=status.HTTP_400_BAD_REQUEST
+            status=status.HTTP_200_OK
         )
 
     idle = IdleSession.objects.create(
@@ -316,20 +465,33 @@ def start_idle(request):
         work_session=work_session
     )
 
+    # Stop active application/website tracking during break
+    for app in ApplicationUsage.objects.filter(user=request.user, end_time__isnull=True):
+        try:
+            app.stop()
+        except Exception:
+            pass
+
+    for site in WebsiteUsage.objects.filter(user=request.user, end_time__isnull=True):
+        try:
+            site.stop()
+        except Exception:
+            pass
+
     serializer = IdleSessionSerializer(idle)
 
     send_notification(
         company=request.user.company,
         user=request.user,
-        title="Idle Started",
-        message="You have become idle.",
+        title="Break Started",
+        message="You have started your break.",
         notification_type="idle",
     )
 
     return Response(
         {
             "success": True,
-            "message": "Idle Started",
+            "message": "Break session started",
             "data": serializer.data
         },
         status=status.HTTP_201_CREATED
@@ -350,7 +512,7 @@ def end_idle(request):
         return Response(
             {
                 "success": False,
-                "message": "No active idle session."
+                "message": "No active break session."
             },
             status=status.HTTP_400_BAD_REQUEST
         )
@@ -361,16 +523,30 @@ def end_idle(request):
     send_notification(
         company=request.user.company,
         user=request.user,
-        title="Idle Ended",
-        message="You are active again.",
+        title="Break Ended",
+        message="You have resumed work.",
         notification_type="idle",
     )
+
+    # Calculate updated break and working seconds
+    work_session = idle.work_session
+    now = timezone.now()
+    total_session_seconds = max(0, int((now - work_session.clock_in).total_seconds())) if work_session and work_session.clock_in else 0
+    completed_idles = IdleSession.objects.filter(work_session=work_session, idle_end_time__isnull=False)
+    total_break_seconds = sum(
+        int(i.duration.total_seconds()) if i.duration else max(0, int((i.idle_end_time - i.idle_start_time).total_seconds()))
+        for i in completed_idles
+    )
+    working_seconds = max(0, total_session_seconds - total_break_seconds)
 
     return Response(
         {
             "success": True,
-            "message": "Idle Ended",
-            "data": serializer.data
+            "message": "Break session ended",
+            "data": serializer.data,
+            "break_seconds": total_break_seconds,
+            "working_seconds": working_seconds,
+            "elapsed_seconds": working_seconds
         },
         status=status.HTTP_200_OK
     )
@@ -433,8 +609,7 @@ def start_application(request):
 
 
     if active_application:
-
-        if(
+        if (
             active_application.application_name == application_name and
             active_application.window_title == window_title
         ):
@@ -445,9 +620,20 @@ def start_application(request):
                 },
                 status=status.HTTP_200_OK
             )
-        active_application.stop()
+        try:
+            active_application.stop()
+        except Exception:
+            pass
 
-    application_name = ApplicationUsage.objects.create(
+    # Ensure all previous unclosed applications for this user are stopped
+    ApplicationUsage.objects.filter(
+        user=request.user,
+        end_time__isnull=True
+    ).exclude(id=active_application.id if active_application else 0).update(
+        end_time=timezone.now()
+    )
+
+    app_instance = ApplicationUsage.objects.create(
         company=request.user.company,
         user=request.user,
         work_session=work_session,
@@ -455,7 +641,7 @@ def start_application(request):
         window_title=window_title
     )
 
-    serializer = ApplicationUsageSerializer(application_name)
+    serializer = ApplicationUsageSerializer(app_instance)
 
     return Response(
         {
@@ -471,13 +657,13 @@ def start_application(request):
 @permission_classes([IsAuthenticated, IsEmployeeRole])
 def end_application(request):
 
-    application_name = ApplicationUsage.objects.filter(
+    active_app = ApplicationUsage.objects.filter(
         company=request.user.company,
         user=request.user,
         end_time__isnull=True
     ).first()
 
-    if not application_name:
+    if not active_app:
         return Response(
             {
                 "success": False,
@@ -485,9 +671,9 @@ def end_application(request):
             },
             status=status.HTTP_400_BAD_REQUEST
         )
-    application_name.stop()
+    active_app.stop()
 
-    serializer = ApplicationUsageSerializer(application_name)
+    serializer = ApplicationUsageSerializer(active_app)
 
     return Response({
         "success": True,
@@ -561,7 +747,6 @@ def start_website(request):
     ).first()
 
     if active_website:
-
         if (
             active_website.website == website
             and
@@ -573,8 +758,18 @@ def start_website(request):
                     "message": "Website already active."
                 }
             )
+        try:
+            active_website.stop()
+        except Exception:
+            pass
 
-        active_website.stop()
+    # Ensure all previous unclosed websites for this user are stopped
+    WebsiteUsage.objects.filter(
+        user=request.user,
+        end_time__isnull=True
+    ).exclude(id=active_website.id if active_website else 0).update(
+        end_time=timezone.now()
+    )
 
     website_usage = WebsiteUsage.objects.create(
         company=request.user.company,
@@ -651,6 +846,11 @@ def my_websites(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def apply_leave(request):
+    if request.user.role in ["admin", "super_admin"]:
+        return Response(
+            {"error": "Administrators cannot apply for leave."},
+            status=status.HTTP_403_FORBIDDEN
+        )
 
     serializer = LeaveRequestSerializer(data=request.data)
 
@@ -658,7 +858,6 @@ def apply_leave(request):
 
         leave_type = get_object_or_404(
             LeaveType,
-            # id=request.data.get("leave_type"),
             id=serializer.validated_data["leave_type"].id,
             company=request.user.company,
             status="active"
@@ -683,8 +882,6 @@ def apply_leave(request):
 
         total_days = (end_date - start_date).days + 1
 
-
-
         existing_leave = LeaveRequest.objects.filter(
             company=request.user.company,
             employee=request.user,
@@ -692,7 +889,6 @@ def apply_leave(request):
             end_date__gte=start_date,
             status__in=["pending", "approved"]
         ).exists()
-
 
         if existing_leave:
             return Response(
@@ -708,22 +904,58 @@ def apply_leave(request):
             status="pending"
         )
 
+        # Notify all company Admins
         admins = User.objects.filter(
             company=request.user.company,
             role="admin"
         )
 
+        applicant_name = request.user.get_full_name() or request.user.first_name or request.user.email
+
         for admin in admins:
             try:
-                print(f"Sending notification to {admin.email}")
-
                 send_notification(
                     company=request.user.company,
                     user=admin,
                     title="New Leave Request",
-                    message=f"{request.user.email} applied for {leave_type.name} leave.",
+                    message=f"{applicant_name} applied for {leave_type.name} leave ({start_date} to {end_date}).",
                     notification_type="leave_request",
                 )
+
+                full_name = f"{admin.first_name} {admin.last_name}".strip()
+
+                send_email_notification(
+                    company=request.user.company,
+                    subject="New Leave Request",
+                    message=(
+                        f"Hello {full_name or admin.username},\n\n"
+                        f"A new leave request has been submitted.\n\n"
+                        f"Employee: {applicant_name}\n"
+                        f"Email: {request.user.email}\n"
+                        f"Leave Type: {leave_type.name}\n"
+                        f"From: {start_date}\n"
+                        f"To: {end_date}\n"
+                        f"Total Days: {total_days}\n\n"
+                        f"Please log in to Work Track Management to review and approve or reject the request."
+                    ),
+                    recipient_email=admin.email,
+                )
+            except Exception as e:
+                print(f"Admin notification failed: {e}")
+
+        # If employee belongs to a team with a team lead (and team lead is not the applicant)
+        if request.user.team and request.user.team.team_lead and request.user.team.team_lead != request.user:
+            team_lead = request.user.team.team_lead
+            try:
+                send_notification(
+                    company=request.user.company,
+                    user=team_lead,
+                    title="Team Member Leave Request",
+                    message=f"{applicant_name} ({request.user.team.team_name}) applied for {leave_type.name} leave.",
+                    notification_type="leave_request",
+                )
+            except Exception as e:
+                print(f"Team lead notification failed: {e}")
 
                 full_name = f"{admin.first_name} {admin.last_name}".strip()
 

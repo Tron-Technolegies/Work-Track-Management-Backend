@@ -9,7 +9,7 @@ class IsAdminRole(BasePermission):
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and
-            request.user.role == 'admin'
+            request.user.role in ['admin', 'super_admin']
         )
     
 class IsProjectLeadRole(BasePermission):
@@ -25,13 +25,13 @@ class IsProjectLeadRole(BasePermission):
 
 class IsEmployeeRole(BasePermission):
     """
-    Allows access only to users with the employee role.
+    Allows access to users with the employee or project lead role.
     """
     message = "Employee access only."
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and 
-            request.user.role == "user"
+            request.user.role in ["user", "employee", "project_lead"]
         )
 
 
@@ -43,7 +43,7 @@ class IsAdminOrProjectLead(BasePermission):
     def has_permission(self, request, view):
         return (
             request.user.is_authenticated and
-            request.user.role in ['admin', 'project_lead']
+            request.user.role in ['admin', 'super_admin', 'project_lead']
         )
     
 class IsAdminOrOwner(BasePermission):
