@@ -24,6 +24,9 @@ from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from work_track_admin.notification_service import send_notification
 from work_track_admin.email_service import send_email_notification
+import os
+import cloudinary
+
 
 
 
@@ -246,6 +249,9 @@ def upload_screenshot(request):
     image = request.data.get("image")
     reason = request.data.get("reason", "periodic")
 
+    # ---------------------------------
+    # 1. Check image
+    # ---------------------------------
     if not image:
         return Response(
             {
@@ -255,7 +261,9 @@ def upload_screenshot(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Check active work session
+    # ---------------------------------
+    # 2. Check active work session
+    # ---------------------------------
     session = WorkSession.objects.filter(
         company=request.user.company,
         user=request.user,
@@ -271,91 +279,154 @@ def upload_screenshot(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Extract base64 data
+    # ---------------------------------
+    # 3. Decode Base64
+    # ---------------------------------
     try:
         if ";base64," in image:
             _, imgstr = image.split(";base64,", 1)
         else:
             imgstr = image
 
-        image_data = base64.b64decode(imgstr)
+        imgstr = imgstr.strip()
+
+        # Fix missing Base64 padding
+        imgstr += "=" * (-len(imgstr) % 4)
+
+        image_data = base64.b64decode(
+            imgstr,
+            validate=True
+        )
 
     except Exception as e:
-        print("Base64 decode error:", e)
+        print("❌ Base64 decode error:", repr(e))
 
         return Response(
             {
                 "success": False,
-                "error": "Invalid image format"
+                "error": f"Invalid image format: {str(e)}"
             },
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Upload to Cloudinary or fallback to storage
-    filename = f"{request.user.id}_{timezone.now():%Y%m%d_%H%M%S}"
-    image_identifier = None
+    # ---------------------------------
+    # 4. Upload to Cloudinary
+    # ---------------------------------
     try:
-        if CLOUDINARY_AVAILABLE and os.getenv("CLOUDINARY_CLOUD_NAME"):
-            upload_result = cloudinary.uploader.upload(
-                image_data,
-                folder="worktrack/screenshots",
-                public_id=filename,
-                resource_type="image"
-            )
-            image_identifier = upload_result.get("public_id") or upload_result.get("secure_url")
-    except Exception as e:
-        print("Cloudinary upload failed, falling back to direct storage:", e)
 
-    try:
-        if image_identifier:
-            screenshot = Screenshot.objects.create(
-                company=request.user.company,
-                user=request.user,
-                work_session=session,
-                image=image_identifier,
-                reason=reason
+        if not os.getenv("CLOUDINARY_CLOUD_NAME"):
+            raise Exception(
+                "CLOUDINARY_CLOUD_NAME is not configured"
             )
-        else:
-            screenshot = Screenshot(
-                company=request.user.company,
-                user=request.user,
-                work_session=session,
-                reason=reason
+
+        filename = (
+            f"{request.user.id}_"
+            f"{timezone.now():%Y%m%d_%H%M%S_%f}"
+        )
+
+        upload_result = cloudinary.uploader.upload(
+            image_data,
+            folder="worktrack/screenshots",
+            public_id=filename,
+            resource_type="image"
+        )
+
+        image_identifier = upload_result.get("public_id")
+
+        if not image_identifier:
+            raise Exception(
+                "Cloudinary did not return public_id"
             )
-            screenshot.image.save(f"{filename}.jpg", ContentFile(image_data), save=True)
 
-        serializer = ScreenshotSerializer(screenshot)
-
-        # Notification should not break screenshot upload
-        try:
-            send_notification(
-                company=request.user.company,
-                user=request.user,
-                title="Screenshot Uploaded",
-                message="A new screenshot has been uploaded.",
-                notification_type="screenshot",
-            )
-        except Exception as e:
-            print("Notification failed:", e)
-
-        return Response(
-            {
-                "success": True,
-                "message": "Screenshot uploaded successfully",
-                "data": serializer.data
-            },
-            status=status.HTTP_201_CREATED
+        print(
+            "✅ Cloudinary upload successful:",
+            image_identifier
         )
 
     except Exception as e:
-        print("Failed to save screenshot record:", e)
+
+        print(
+            "❌ Cloudinary upload failed:",
+            repr(e)
+        )
+
         return Response(
             {
                 "success": False,
-                "error": "Failed to save screenshot record"
+                "error": f"Cloudinary upload failed: {str(e)}"
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+    # ---------------------------------
+    # 5. Save Screenshot record
+    # ---------------------------------
+    try:
+
+        screenshot = Screenshot.objects.create(
+            company=request.user.company,
+            user=request.user,
+            work_session=session,
+            image=image_identifier,
+            reason=reason
+        )
+
+        print(
+            "✅ Screenshot saved:",
+            screenshot.id
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ Screenshot database error:",
+            repr(e)
+        )
+
+        return Response(
+            {
+                "success": False,
+                "error": f"Failed to save screenshot: {str(e)}"
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    # ---------------------------------
+    # 6. Serialize response
+    # ---------------------------------
+    serializer = ScreenshotSerializer(screenshot)
+
+    # ---------------------------------
+    # 7. Notification
+    # ---------------------------------
+    try:
+
+        send_notification(
+            company=request.user.company,
+            user=request.user,
+            title="Screenshot Uploaded",
+            message="A new screenshot has been uploaded.",
+            notification_type="screenshot",
+        )
+
+    except Exception as e:
+
+        print(
+            "⚠️ Notification failed:",
+            repr(e)
+        )
+
+    # ---------------------------------
+    # 8. Success
+    # ---------------------------------
+    return Response(
+        {
+            "success": True,
+            "message": "Screenshot uploaded successfully",
+            "data": serializer.data
+        },
+        status=status.HTTP_201_CREATED
+    )
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, IsEmployeeRole])
