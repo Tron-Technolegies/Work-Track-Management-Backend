@@ -77,12 +77,13 @@ class TaskSerializer(serializers.ModelSerializer):
         representation = super().to_representation(instance)
 
         # Assigned By
-        representation["assigned_by"] = (
-            instance.assigned_by.first_name
-            or instance.assigned_by.username
-            if instance.assigned_by
-            else None
-        )
+        if instance.assigned_by:
+            representation["assigned_by"] = (
+                instance.assigned_by.first_name
+                or instance.assigned_by.username
+            )
+        else:
+            representation["assigned_by"] = None
 
         # Assigned Users
         representation["assigned_to"] = UserSerializer(
@@ -104,33 +105,24 @@ class TaskSerializer(serializers.ModelSerializer):
             else None
         )
 
-        # Actual Task Time
-        task_times = TaskTime.objects.filter(task=instance)
+        # Actual Task Time using related sessions
+        task_times = list(instance.sessions.all()) if hasattr(instance, "sessions") else list(TaskTime.objects.filter(task=instance))
 
         total_seconds = 0
+        now = timezone.now()
 
         for tt in task_times:
-
             if tt.duration:
                 total_seconds += tt.duration.total_seconds()
-
             elif tt.start_time and tt.end_time:
-                total_seconds += (
-                    tt.end_time - tt.start_time
-                ).total_seconds()
-
+                total_seconds += (tt.end_time - tt.start_time).total_seconds()
             elif tt.start_time and not tt.end_time:
-                total_seconds += (
-                    timezone.now() - tt.start_time
-                ).total_seconds()
+                total_seconds += (now - tt.start_time).total_seconds()
 
         hours = int(total_seconds // 3600)
         minutes = int((total_seconds % 3600) // 60)
 
-        representation["time_spent"] = (
-            f"{hours:02d}h {minutes:02d}m"
-        )
-
+        representation["time_spent"] = f"{hours:02d}h {minutes:02d}m"
         representation["total_seconds_spent"] = int(total_seconds)
 
         return representation
@@ -144,52 +136,52 @@ class ProjectSerializer(serializers.ModelSerializer):
         model = Project
         exclude = ["company"]
 
-    def get_progress(self, instance):
-        total_tasks = instance.tasks.count()
+    def _get_task_stats(self, instance):
+        if hasattr(instance, "_cached_task_stats"):
+            return instance._cached_task_stats
+
+        tasks = list(instance.tasks.all())
+        total_tasks = len(tasks)
 
         if total_tasks == 0:
-            return 0
+            stats = {"progress": 0, "status": "Pending"}
+        else:
+            completed_tasks = sum(
+                1 for t in tasks if str(getattr(t, "status", "")).strip().lower() == "completed"
+            )
+            in_progress_tasks = sum(
+                1 for t in tasks if str(getattr(t, "status", "")).strip().lower() == "in progress"
+            )
+            progress = round((completed_tasks / total_tasks) * 100)
+            if completed_tasks == total_tasks:
+                calc_status = "Completed"
+            elif in_progress_tasks > 0:
+                calc_status = "In Progress"
+            else:
+                calc_status = "Pending"
+            stats = {"progress": progress, "status": calc_status}
 
-        completed_tasks = instance.tasks.filter(
-            status="Completed"
-        ).count()
+        instance._cached_task_stats = stats
+        return stats
 
-        return round((completed_tasks / total_tasks) * 100)
+    def get_progress(self, instance):
+        return self._get_task_stats(instance)["progress"]
 
     def get_status(self, instance):
-        total_tasks = instance.tasks.count()
-
-        if total_tasks == 0:
-            return "Pending"
-
-        completed_tasks = instance.tasks.filter(
-            status="Completed"
-        ).count()
-
-        in_progress_tasks = instance.tasks.filter(
-            status="In Progress"
-        ).count()
-
-        if completed_tasks == total_tasks:
-            return "Completed"
-
-        if in_progress_tasks > 0:
-            return "In Progress"
-
-        return "Pending"
+        return self._get_task_stats(instance)["status"]
 
     def get_attachment_url(self, instance):
         if not instance.attachments:
             return None
 
         request = self.context.get("request")
-
         if request:
-            return request.build_absolute_uri(
-                instance.attachments.url
-            )
+            try:
+                return request.build_absolute_uri(instance.attachments.url)
+            except Exception:
+                pass
 
-        return instance.attachments.url
+        return getattr(instance.attachments, "url", str(instance.attachments))
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -241,44 +233,59 @@ class WorkSessionSerializer(serializers.ModelSerializer):
             "created_at",
         )
 
-    def get_break_seconds(self, obj):
-        idles = obj.idle_sessions.all()
-        total_sec = 0
+    def _get_session_metrics(self, obj):
+        if hasattr(obj, "_cached_session_metrics"):
+            return obj._cached_session_metrics
+
         now = timezone.now()
+        idles = list(obj.idle_sessions.all())
+        break_sec = 0
+        is_on_break = False
+
         for idle in idles:
             if idle.duration:
-                total_sec += int(idle.duration.total_seconds())
+                break_sec += int(idle.duration.total_seconds())
             elif idle.idle_end_time:
-                total_sec += max(0, int((idle.idle_end_time - idle.idle_start_time).total_seconds()))
-            elif not idle.idle_end_time and not obj.clock_out:
-                total_sec += max(0, int((now - idle.idle_start_time).total_seconds()))
-        return total_sec
+                break_sec += max(0, int((idle.idle_end_time - idle.idle_start_time).total_seconds()))
+            elif not idle.idle_end_time:
+                if not obj.clock_out:
+                    break_sec += max(0, int((now - idle.idle_start_time).total_seconds()))
+                    is_on_break = True
 
-    def get_break_time(self, obj):
-        sec = self.get_break_seconds(obj)
-        h = sec // 3600
-        m = (sec % 3600) // 60
-        return f"{h:02d}h {m:02d}m"
-
-    def get_net_work_seconds(self, obj):
-        now = timezone.now()
         if obj.clock_out:
+            is_on_break = False
             total_sec = int(obj.total_work_time.total_seconds()) if obj.total_work_time else int((obj.clock_out - obj.clock_in).total_seconds())
         else:
             total_sec = max(0, int((now - obj.clock_in).total_seconds()))
-        break_sec = self.get_break_seconds(obj)
-        return max(0, total_sec - break_sec)
+
+        net_sec = max(0, total_sec - break_sec)
+        h_break, m_break = break_sec // 3600, (break_sec % 3600) // 60
+        h_net, m_net = net_sec // 3600, (net_sec % 3600) // 60
+
+        metrics = {
+            "break_seconds": break_sec,
+            "break_time": f"{h_break:02d}h {m_break:02d}m",
+            "net_work_seconds": net_sec,
+            "net_work_time": f"{h_net:02d}h {m_net:02d}m",
+            "is_on_break": is_on_break,
+        }
+        obj._cached_session_metrics = metrics
+        return metrics
+
+    def get_break_seconds(self, obj):
+        return self._get_session_metrics(obj)["break_seconds"]
+
+    def get_break_time(self, obj):
+        return self._get_session_metrics(obj)["break_time"]
+
+    def get_net_work_seconds(self, obj):
+        return self._get_session_metrics(obj)["net_work_seconds"]
 
     def get_net_work_time(self, obj):
-        sec = self.get_net_work_seconds(obj)
-        h = sec // 3600
-        m = (sec % 3600) // 60
-        return f"{h:02d}h {m:02d}m"
+        return self._get_session_metrics(obj)["net_work_time"]
 
     def get_is_on_break(self, obj):
-        if obj.clock_out:
-            return False
-        return obj.idle_sessions.filter(idle_end_time__isnull=True).exists()
+        return self._get_session_metrics(obj)["is_on_break"]
 
 
 class ScreenshotSerializer(serializers.ModelSerializer):

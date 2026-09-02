@@ -7,10 +7,6 @@ class WorkTrackAdminConfig(AppConfig):
     name = 'work_track_admin'
 
     def ready(self):
-        # Start background monitor worker when server starts
-        if os.environ.get('RUN_MAIN') == 'true' or not settings.DEBUG:
-            try:
-                from .monitor_service import start_monitor_service
-                start_monitor_service()
-            except Exception:
-                pass
+        # Background desktop monitoring service is designed for client-side execution (monitor.py)
+        # and should not run within the headless cloud web server.
+        pass

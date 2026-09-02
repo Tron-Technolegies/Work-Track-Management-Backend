@@ -431,11 +431,16 @@ def upload_screenshot(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, IsEmployeeRole])
 def my_screenshots(request):
-
+    limit = request.GET.get("limit")
     screenshots = Screenshot.objects.filter(
         company=request.user.company,
         user=request.user
-    ).order_by("-captured_at")
+    ).select_related("user", "work_session").order_by("-captured_at")
+
+    if limit and limit.isdigit():
+        screenshots = screenshots[:int(limit)]
+    else:
+        screenshots = screenshots[:100]
 
     serializer = ScreenshotSerializer(
         screenshots,

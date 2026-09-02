@@ -637,7 +637,7 @@ def Get_Users(request):
         users = User.objects.filter(
             company=request.user.company,
             is_active=True
-        ).exclude(role="admin")
+        ).exclude(role="admin").select_related("company", "team")
         if team_id and str(team_id).lower() != "all":
             users = users.filter(team_id=team_id)
     else:
@@ -646,13 +646,13 @@ def Get_Users(request):
                 company=request.user.company,
                 team=request.user.team,
                 is_active=True
-            ).exclude(role="admin")
+            ).exclude(role="admin").select_related("company", "team")
         else:
             users = User.objects.filter(
                 id=request.user.id,
                 company=request.user.company,
                 is_active=True
-            )
+            ).select_related("company", "team")
 
     serializer = UserSerializer(users, many=True)
 
@@ -670,7 +670,7 @@ def Get_User_List(request):
             is_active=True
         ).exclude(
             role="admin"
-        ).order_by("first_name")
+        ).select_related("company", "team").order_by("first_name")
         if team_id and str(team_id).lower() != "all":
             users = users.filter(team_id=team_id)
     else:
@@ -681,13 +681,13 @@ def Get_User_List(request):
                 is_active=True
             ).exclude(
                 role="admin"
-            ).order_by("first_name")
+            ).select_related("company", "team").order_by("first_name")
         else:
             users = User.objects.filter(
                 id=request.user.id,
                 company=request.user.company,
                 is_active=True
-            ).order_by("first_name")
+            ).select_related("company", "team").order_by("first_name")
 
     serializer = UserSerializer(users, many=True)
 
@@ -964,6 +964,17 @@ def View_Projects(request):
             company=request.user.company,
             assigned_to=request.user
         ).order_by("-id")
+
+    projects = projects.select_related(
+        "company", "team"
+    ).prefetch_related(
+        "assigned_to",
+        "tasks",
+        "tasks__assigned_to",
+        "tasks__assigned_by",
+        "tasks__team",
+        "tasks__sessions"
+    )
 
     serializer = ProjectSerializer(projects, many=True)
     data = serializer.data
@@ -1594,6 +1605,14 @@ def View_Tasks(request):
     # SERIALIZE
     # ==========================================
 
+    tasks = tasks.select_related(
+        "company", "team", "project", "assigned_by"
+    ).prefetch_related(
+        "assigned_to",
+        "sessions",
+        "team"
+    )
+
     serializer = TaskSerializer(tasks, many=True)
 
     return Response({
@@ -1625,6 +1644,14 @@ def View_User_Tasks(request):
             Q(status__icontains=query) |
             Q(description__icontains=query)
         )
+
+    tasks = tasks.select_related(
+        "company", "team", "project", "assigned_by"
+    ).prefetch_related(
+        "assigned_to",
+        "sessions",
+        "team"
+    )
 
     serializer = TaskSerializer(tasks, many=True)
 
@@ -3908,6 +3935,12 @@ def all_screenshots(request):
         )
 
     screenshots = screenshots.order_by("-captured_at")
+    limit = request.GET.get("limit")
+    if limit and limit.isdigit():
+        screenshots = screenshots[:int(limit)]
+    elif not date and not user_id and not reason:
+        screenshots = screenshots[:100]
+
     data = []
 
     for screenshot in screenshots:
@@ -6231,13 +6264,12 @@ def active_teams(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, IsAdminRole])
-def team_lead_list(request):    
-
+def team_lead_list(request):
     users = User.objects.filter(
         company=request.user.company,
         role__in=["admin", "project_lead"],
         is_active=True
-    )
+    ).select_related("company", "team")  # Prevent N+1 via UserSerializer
 
     serializer = UserSerializer(users, many=True)
 
@@ -6964,4 +6996,17 @@ def team_details(request, team_id):
 
         "tasks": task_data
 
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([])
+def health_check(request):
+    """
+    Lightweight health check endpoint for monitoring services and Render keep-alive pings.
+    Does not perform heavy database queries.
+    """
+    return Response({
+        "status": "healthy",
+        "timestamp": timezone.now().isoformat()
     }, status=status.HTTP_200_OK)
