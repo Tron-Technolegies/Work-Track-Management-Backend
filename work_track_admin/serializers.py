@@ -409,6 +409,8 @@ class ApplicationUsageSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    duration_seconds = serializers.SerializerMethodField()
+    formatted_duration = serializers.SerializerMethodField()
 
     class Meta:
         model = ApplicationUsage
@@ -424,9 +426,29 @@ class ApplicationUsageSerializer(serializers.ModelSerializer):
             "start_time",
             "end_time",
             "duration",
+            "duration_seconds",
+            "formatted_duration",
             "is_productive",
             "created_at",
         ]
+
+    def get_duration_seconds(self, obj):
+        if obj.duration:
+            return int(obj.duration.total_seconds())
+        if obj.end_time and obj.start_time:
+            return max(0, int((obj.end_time - obj.start_time).total_seconds()))
+        if obj.start_time:
+            return max(0, int((timezone.now() - obj.start_time).total_seconds()))
+        return 0
+
+    def get_formatted_duration(self, obj):
+        sec = self.get_duration_seconds(obj)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
+        if h > 0:
+            return f"{h:02d}h {m:02d}m {s:02d}s"
+        return f"{m:02d}m {s:02d}s"
 
 
 from rest_framework import serializers
@@ -434,10 +456,38 @@ from .models import WebsiteUsage
 
 
 class WebsiteUsageSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(
+        source="user.get_full_name",
+        read_only=True
+    )
+    email = serializers.EmailField(
+        source="user.email",
+        read_only=True
+    )
+    duration_seconds = serializers.SerializerMethodField()
+    formatted_duration = serializers.SerializerMethodField()
 
     class Meta:
         model = WebsiteUsage
         exclude = ["company"]
+
+    def get_duration_seconds(self, obj):
+        if obj.duration:
+            return int(obj.duration.total_seconds())
+        if obj.end_time and obj.start_time:
+            return max(0, int((obj.end_time - obj.start_time).total_seconds()))
+        if obj.start_time:
+            return max(0, int((timezone.now() - obj.start_time).total_seconds()))
+        return 0
+
+    def get_formatted_duration(self, obj):
+        sec = self.get_duration_seconds(obj)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
+        if h > 0:
+            return f"{h:02d}h {m:02d}m {s:02d}s"
+        return f"{m:02d}m {s:02d}s"
 
 
 from rest_framework import serializers

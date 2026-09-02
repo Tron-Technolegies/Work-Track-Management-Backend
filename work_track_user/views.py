@@ -691,18 +691,13 @@ def start_application(request):
                 },
                 status=status.HTTP_200_OK
             )
+
+    # Ensure all previous unclosed applications for this user are properly stopped with duration
+    for unclosed_app in ApplicationUsage.objects.filter(user=request.user, end_time__isnull=True):
         try:
-            active_application.stop()
+            unclosed_app.stop()
         except Exception:
             pass
-
-    # Ensure all previous unclosed applications for this user are stopped
-    ApplicationUsage.objects.filter(
-        user=request.user,
-        end_time__isnull=True
-    ).exclude(id=active_application.id if active_application else 0).update(
-        end_time=timezone.now()
-    )
 
     app_instance = ApplicationUsage.objects.create(
         company=request.user.company,
@@ -829,18 +824,13 @@ def start_website(request):
                     "message": "Website already active."
                 }
             )
+
+    # Ensure all previous unclosed websites for this user are properly stopped with duration
+    for unclosed_site in WebsiteUsage.objects.filter(user=request.user, end_time__isnull=True):
         try:
-            active_website.stop()
+            unclosed_site.stop()
         except Exception:
             pass
-
-    # Ensure all previous unclosed websites for this user are stopped
-    WebsiteUsage.objects.filter(
-        user=request.user,
-        end_time__isnull=True
-    ).exclude(id=active_website.id if active_website else 0).update(
-        end_time=timezone.now()
-    )
 
     website_usage = WebsiteUsage.objects.create(
         company=request.user.company,
