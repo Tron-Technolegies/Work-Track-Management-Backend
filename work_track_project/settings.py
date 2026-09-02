@@ -169,12 +169,21 @@ ENCRYPTION_KEY = config("ENCRYPTION_KEY")
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
+#
+# IMPORTANT — Render / Daphne (ASGI) notes:
+#   • conn_max_age=0 means each request gets a fresh connection.
+#     Persistent connections (conn_max_age > 0) are NOT safe under ASGI/Daphne
+#     because a single worker handles many concurrent coroutines; a stale
+#     connection reused by one coroutine corrupts others.
+#   • Render PostgreSQL requires SSL. dj_database_url propagates sslmode from
+#     the URL; we add it explicitly here as a fallback.
 
 DATABASES = {
     'default': dj_database_url.config(
         default=os.getenv('DATABASE_URL'),
-        conn_max_age=600,
-        conn_health_checks=True,
+        conn_max_age=0,          # Never reuse connections under ASGI
+        conn_health_checks=False, # Redundant when conn_max_age=0
+        ssl_require=True,        # Render PostgreSQL enforces SSL
     )
 }
 
