@@ -447,15 +447,32 @@ class WorkTrackAgent:
             if keyword in title_lower:
                 return domain, cleaned
 
-        # Heuristic 3: Check for separator like " | " or " - " (e.g., "Title - SiteName")
+        # Heuristic 3: Check for separator like " | " or " - " (e.g., "Page Title - Site Name")
         if " - " in cleaned:
-            parts = cleaned.rsplit(" - ", 1)
-            site_candidate = parts[-1].strip().lower().replace(" ", "") + ".com"
-            return site_candidate, cleaned
+            parts = [p.strip() for p in cleaned.split(" - ") if p.strip()]
+            for p in reversed(parts):
+                t_match = TLD_REGEX.search(p)
+                if t_match:
+                    return t_match.group(1).lower(), cleaned
+                p_clean = p.lower()
+                for keyword, domain in known_sites.items():
+                    if keyword in p_clean:
+                        return domain, cleaned
+            if len(parts) >= 2:
+                return parts[-1], cleaned
+
         if " | " in cleaned:
-            parts = cleaned.rsplit(" | ", 1)
-            site_candidate = parts[-1].strip().lower().replace(" ", "") + ".com"
-            return site_candidate, cleaned
+            parts = [p.strip() for p in cleaned.split(" | ") if p.strip()]
+            for p in reversed(parts):
+                t_match = TLD_REGEX.search(p)
+                if t_match:
+                    return t_match.group(1).lower(), cleaned
+                p_clean = p.lower()
+                for keyword, domain in known_sites.items():
+                    if keyword in p_clean:
+                        return domain, cleaned
+            if len(parts) >= 2:
+                return parts[-1], cleaned
 
         return "web-browsing", cleaned
 
