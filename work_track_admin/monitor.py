@@ -25,6 +25,24 @@ from datetime import datetime
 
 import requests
 
+# ── Single-instance lock: prevent duplicate agent processes ──
+_LOCK_FILE = os.path.join(os.path.expanduser("~"), ".worktrack_agent.lock")
+
+def _acquire_single_instance_lock():
+    """Return a lock file handle if we are the first instance, else exit."""
+    try:
+        import msvcrt
+        lf = open(_LOCK_FILE, "w")
+        try:
+            msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+            return lf            # first instance — keep handle open
+        except OSError:
+            lf.close()
+            print("WorkTrack Agent is already running. Exiting duplicate instance.")
+            sys.exit(0)
+    except Exception:
+        return None              # non-Windows — skip locking
+
 # ── Desktop capture libraries ──
 try:
     from PIL import Image, ImageGrab
@@ -822,11 +840,15 @@ class WorkTrackAgent:
 
 
 def main():
+    # Prevent duplicate agent instances (e.g. triggered twice on login)
+    _lock = _acquire_single_instance_lock()  # noqa: F841 — keep reference alive
+
     parser = argparse.ArgumentParser(description="WorkTrack Desktop Monitoring Agent")
     parser.add_argument("--url", help="Backend URL (default: Render production URL)", default=None)
     parser.add_argument("--email", help="Employee login email", default=None)
     parser.add_argument("--password", help="Employee login password", default=None)
     parser.add_argument("--token", help="Direct JWT Access Token", default=None)
+    parser.add_argument("--login-only", action="store_true", help="Authenticate and save session without starting tracker")
     args = parser.parse_args()
 
     agent = WorkTrackAgent(base_url=args.url)
@@ -834,7 +856,12 @@ def main():
         agent.access_token = args.token
 
     if args.email and args.password:
-        agent.login(args.email, args.password)
+        success = agent.login(args.email, args.password)
+        if args.login_only:
+            sys.exit(0 if success else 1)
+
+    if args.login_only:
+        sys.exit(0 if agent.authenticate_or_prompt() else 1)
 
     agent.run()
 
