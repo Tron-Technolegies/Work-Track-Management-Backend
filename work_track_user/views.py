@@ -30,8 +30,6 @@ import cloudinary
 
 
 
-# from work_track_admin.monitor_service import start_monitor_service, trigger_immediate_capture
-
 # Create your views here.
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, IsEmployeeRole])
@@ -45,7 +43,6 @@ def clock_in(request):
     ).first()
 
     if active_session:
-        # Ensure monitor service is active
         return Response(
             {
                 "success": False,
@@ -58,8 +55,6 @@ def clock_in(request):
         company=request.user.company,
         user=request.user
     )
-
-    # Automatically start the Python background desktop monitoring service
 
     # Create initial application usage record
     try:
