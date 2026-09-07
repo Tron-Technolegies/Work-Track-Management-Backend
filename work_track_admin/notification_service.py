@@ -37,12 +37,14 @@ def send_notification(company, user, title, message, notification_type):
             },
         )
 
-        print("✅ WebSocket notification sent")
+        print("[WS] WebSocket notification sent")
 
     except Exception as e:
         # Redis/WebSocket failure should NOT break the main operation
-        print("⚠️ WebSocket notification failed")
-        print(f"Redis/Channel error: {e}")
+        try:
+            print(f"[WS] WebSocket notification not sent (Redis offline): {type(e).__name__}")
+        except Exception:
+            pass
 
     # Always return the database notification
     return notification

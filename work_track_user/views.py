@@ -260,10 +260,9 @@ def upload_screenshot(request):
     # 2. Check active work session
     # ---------------------------------
     session = WorkSession.objects.filter(
-        company=request.user.company,
         user=request.user,
         clock_out__isnull=True
-    ).first()
+    ).order_by("-clock_in").first()
 
     if not session:
         return Response(
@@ -293,8 +292,23 @@ def upload_screenshot(request):
             validate=True
         )
 
+        # Validate that decoded bytes form a legitimate image
+        from PIL import Image
+        from io import BytesIO
+        try:
+            with Image.open(BytesIO(image_data)) as test_img:
+                test_img.verify()
+        except Exception as img_err:
+            return Response(
+                {
+                    "success": False,
+                    "error": f"Invalid image content: {str(img_err)}"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
     except Exception as e:
-        print("❌ Base64 decode error:", repr(e))
+        print("[ERROR] Base64 decode error:", repr(e))
 
         return Response(
             {
@@ -326,24 +340,17 @@ def upload_screenshot(request):
             resource_type="image"
         )
 
-        image_identifier = upload_result.get("public_id")
+        image_identifier = upload_result.get("secure_url") or upload_result.get("public_id")
 
         if not image_identifier:
             raise Exception(
-                "Cloudinary did not return public_id"
+                "Cloudinary did not return secure_url or public_id"
             )
 
-        print(
-            "✅ Cloudinary upload successful:",
-            image_identifier
-        )
+        print("[Cloudinary] Upload successful:", image_identifier)
 
     except Exception as e:
-
-        print(
-            "❌ Cloudinary upload failed:",
-            repr(e)
-        )
+        print("[Cloudinary] Upload failed:", repr(e))
 
         return Response(
             {
@@ -359,24 +366,17 @@ def upload_screenshot(request):
     try:
 
         screenshot = Screenshot.objects.create(
-            company=request.user.company,
+            company=request.user.company or (session.company if session else None),
             user=request.user,
             work_session=session,
             image=image_identifier,
             reason=reason
         )
 
-        print(
-            "✅ Screenshot saved:",
-            screenshot.id
-        )
+        print("[Screenshot] Saved ID:", screenshot.id)
 
     except Exception as e:
-
-        print(
-            "❌ Screenshot database error:",
-            repr(e)
-        )
+        print("[Screenshot] Database error:", repr(e))
 
         return Response(
             {
@@ -405,11 +405,7 @@ def upload_screenshot(request):
         )
 
     except Exception as e:
-
-        print(
-            "⚠️ Notification failed:",
-            repr(e)
-        )
+        print("[Notification] Failed:", repr(e))
 
     # ---------------------------------
     # 8. Success
@@ -428,7 +424,6 @@ def upload_screenshot(request):
 def my_screenshots(request):
     limit = request.GET.get("limit")
     screenshots = Screenshot.objects.filter(
-        company=request.user.company,
         user=request.user
     ).select_related("user", "work_session").order_by("-captured_at")
 
@@ -653,10 +648,9 @@ def start_application(request):
         )
     
     work_session = WorkSession.objects.filter(
-        company=request.user.company,
         user=request.user,
         clock_out__isnull=True
-    ).first()
+    ).order_by("-clock_in").first()
 
     if not work_session:
         return Response(
@@ -668,11 +662,9 @@ def start_application(request):
         )
     
     active_application = ApplicationUsage.objects.filter(
-        company=request.user.company,
         user=request.user,
         end_time__isnull=True
     ).first()
-
 
     if active_application:
         if (
@@ -695,7 +687,7 @@ def start_application(request):
             pass
 
     app_instance = ApplicationUsage.objects.create(
-        company=request.user.company,
+        company=request.user.company or (work_session.company if work_session else None),
         user=request.user,
         work_session=work_session,
         application_name=application_name,
@@ -719,7 +711,6 @@ def start_application(request):
 def end_application(request):
 
     active_app = ApplicationUsage.objects.filter(
-        company=request.user.company,
         user=request.user,
         end_time__isnull=True
     ).first()
@@ -750,7 +741,6 @@ def end_application(request):
 def my_application_usage(request):
 
     applications = ApplicationUsage.objects.filter(
-        company=request.user.company,
         user=request.user
     ).order_by("-start_time")
 
@@ -781,10 +771,9 @@ def start_website(request):
         )
 
     work_session = WorkSession.objects.filter(
-        company=request.user.company,
         user=request.user,
         clock_out__isnull=True
-    ).first()
+    ).order_by("-clock_in").first()
 
     if not work_session:
         return Response(
@@ -796,13 +785,11 @@ def start_website(request):
         )
 
     application = ApplicationUsage.objects.filter(
-        company=request.user.company,
         user=request.user,
         end_time__isnull=True
     ).first()
 
     active_website = WebsiteUsage.objects.filter(
-        company=request.user.company,
         user=request.user,
         end_time__isnull=True
     ).first()
@@ -828,7 +815,7 @@ def start_website(request):
             pass
 
     website_usage = WebsiteUsage.objects.create(
-        company=request.user.company,
+        company=request.user.company or (work_session.company if work_session else None),
         user=request.user,
         work_session=work_session,
         application_usage=application,
@@ -853,7 +840,6 @@ def start_website(request):
 def end_website(request):
 
     website = WebsiteUsage.objects.filter(
-        company=request.user.company,
         user=request.user,
         end_time__isnull=True
     ).first()
@@ -886,7 +872,6 @@ def end_website(request):
 def my_websites(request):
 
     websites = WebsiteUsage.objects.filter(
-        company=request.user.company,
         user=request.user
     ).order_by("-start_time")
 

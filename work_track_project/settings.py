@@ -94,18 +94,20 @@ MIDDLEWARE = [
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:5174",
+    "http://127.0.0.1:5174",
     "https://worktrackmanagemnet.netlify.app"
-
 ]
 
 CORS_ALLOW_CREDENTIALS= True
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:5174",
+    "http://127.0.0.1:5174",
     "https://worktrackmanagemnet.netlify.app"
-
 ]
 
 ROOT_URLCONF = 'work_track_project.urls'
@@ -187,17 +189,17 @@ DATABASES = {
     )
 }
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         "NAME": os.environ["DB_NAME"],
-#         "USER": os.environ["DB_USER"],
-#         "PASSWORD": os.environ["DB_PASSWORD"],
-#         "HOST": os.environ.get("DB_HOST", "localhost"),
-#         "PORT": os.environ.get("DB_PORT", "5432")
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        "NAME": os.environ["DB_NAME"],
+        "USER": os.environ["DB_USER"],
+        "PASSWORD": os.environ["DB_PASSWORD"],
+        "HOST": os.environ.get("DB_HOST", "localhost"),
+        "PORT": os.environ.get("DB_PORT", "5432")
 
-#     }
-# }
+    }
+}
 
 
 # Password validation
