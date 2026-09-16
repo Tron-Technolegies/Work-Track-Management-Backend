@@ -104,15 +104,36 @@ class Project(models.Model):
     assigned_to = models.ManyToManyField(User, blank=True, related_name='projects')
     team = models.ForeignKey("Team",on_delete=models.SET_NULL,null=True,blank=True,related_name="projects")
     due_date = models.DateField(null=True, blank=True)
-    est_hour = models.IntegerField(default=0)
+    est_hour = models.IntegerField(default=0,null=True,blank=True)
     priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES)
-    links = models.URLField(blank=True)
-    attachments = models.FileField(upload_to="project_files/", blank=True, null=True)
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending')
     active = models.CharField(max_length=15, choices=ACTIVE_CHOICES, default='View')
 
     def __str__(self):
         return self.project_name
+
+class ProjectLink(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="project_links"
+    )
+    url = models.URLField()
+
+    def __str__(self):
+        return self.url
+
+
+class ProjectAttachment(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="project_attachments"
+    )
+    file = models.FileField(upload_to="project_files/")
+
+    def __str__(self):
+        return self.file.name
 class Task(models.Model):
     PRIORITY_CHOICES = [('High', 'High'), ('Medium', 'Medium'), ('Low', 'Low')]
     STATUS_CHOICES = [

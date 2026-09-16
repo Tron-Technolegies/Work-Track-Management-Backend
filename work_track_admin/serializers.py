@@ -16,6 +16,8 @@ from .models import (
     Team,
     AttendanceCorrection,
     SecuritySettings,
+    ProjectLink,
+    ProjectAttachment
 )
 
 User = get_user_model()
@@ -127,10 +129,48 @@ class TaskSerializer(serializers.ModelSerializer):
 
         return representation
 
+class ProjectLinkSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectLink
+        fields = ["id", "url"]
+
+class ProjectAttachmentSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+    file_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProjectAttachment
+        fields = ["id", "file_url", "file_name"]
+
+    def get_file_url(self, obj):
+        if not obj.file:
+            return None
+
+        request = self.context.get("request")
+
+        if request:
+            return request.build_absolute_uri(obj.file.url)
+
+        return obj.file.url
+
+    def get_file_name(self, obj):
+        if not obj.file:
+            return None
+
+        return obj.file.name.split("/")[-1]
+
 class ProjectSerializer(serializers.ModelSerializer):
     progress = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
-    attachment_url = serializers.SerializerMethodField()
+    project_links = ProjectLinkSerializer(
+        many=True,
+        read_only=True
+    )
+
+    project_attachments = ProjectAttachmentSerializer(
+        many=True,
+        read_only=True
+    )
 
     class Meta:
         model = Project
@@ -170,18 +210,6 @@ class ProjectSerializer(serializers.ModelSerializer):
     def get_status(self, instance):
         return self._get_task_stats(instance)["status"]
 
-    def get_attachment_url(self, instance):
-        if not instance.attachments:
-            return None
-
-        request = self.context.get("request")
-        if request:
-            try:
-                return request.build_absolute_uri(instance.attachments.url)
-            except Exception:
-                pass
-
-        return getattr(instance.attachments, "url", str(instance.attachments))
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -203,6 +231,7 @@ class ProjectSerializer(serializers.ModelSerializer):
         )
 
         return representation
+
 
 class TaskTimeSerializer(serializers.ModelSerializer):
     user_details = UserSerializer(source='user', read_only=True)

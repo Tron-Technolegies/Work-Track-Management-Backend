@@ -18,7 +18,7 @@ from django.db.models.functions import ExtractWeekDay
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from requests import request
-from .models import ApplicationUsage, Screenshot,IdleSession,Company,LeaveRequest,Task, Project, Notification, TaskTime, WorkSession,WebsiteUsage,LeaveType,LeavePolicy,Team, AttendanceCorrection, SecuritySettings, MonitoringSettings
+from .models import ApplicationUsage, Screenshot,IdleSession,Company,LeaveRequest,Task, Project, Notification, TaskTime, WorkSession,WebsiteUsage,LeaveType,LeavePolicy,Team, AttendanceCorrection, SecuritySettings, MonitoringSettings,ProjectLink,ProjectAttachment
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
@@ -839,6 +839,15 @@ def Add_Projects(request):
     }
     
     formatted_data = {mapping.get(k, k): v for k, v in data.items()}
+    # Links and attachments are stored separately
+    links = request.data.getlist("links") if hasattr(request.data, "getlist") else []
+
+    if not links:
+        single_link = request.data.get("links")
+        if single_link:
+            links = [single_link]
+
+    formatted_data.pop("links", None)
     
     # Ensure assigned_to is a list of IDs for the serializer if it's currently a single ID
     if 'assigned_to' in formatted_data:
@@ -850,12 +859,6 @@ def Add_Projects(request):
             else:
                 formatted_data['assigned_to'] = [val]
 
-    # Handle attachments separately if not already in formatted_data
-    if 'attachments' in request.FILES:
-        # If model only supports one file, take the first one
-        attachments = request.FILES.getlist('attachments')
-        if attachments:
-            formatted_data['attachments'] = attachments[0]
 
 
     team_id = formatted_data.get("team")
@@ -890,6 +893,20 @@ def Add_Projects(request):
             active="View",
             company=request.user.company
         )
+        # Save multiple project links
+        for link in links:
+            if link and str(link).strip():
+                ProjectLink.objects.create(
+                    project=project,
+                    url=str(link).strip()
+                )
+
+        # Save multiple project attachments
+        for file in request.FILES.getlist("attachments"):
+            ProjectAttachment.objects.create(
+                project=project,
+                file=file
+            )
 
         for user in project.assigned_to.all():
 
@@ -1040,15 +1057,26 @@ def update_projects(request, id):
     mapping = {
         'project_name': 'project_name',
         'description': 'description',
-        'team' : 'team',
+        'team': 'team',
         'due_date': 'due_date',
         'est_hr': 'est_hour',
         'priority': 'priority',
-        'links': 'links',
         'status': 'status',
         'assigned_to': 'assigned_to'
     }
     formatted_data = {mapping.get(k, k): v for k, v in data.items()}
+    # Get multiple links
+
+
+    # Links and attachments are stored separately
+    links = request.data.getlist("links") if hasattr(request.data, "getlist") else []
+
+    if not links:
+        single_link = request.data.get("links")
+        if single_link:
+            links = [single_link]
+
+    formatted_data.pop("links", None)
     if 'assigned_to' in formatted_data and not isinstance(formatted_data['assigned_to'], list):
         formatted_data['assigned_to'] = [formatted_data['assigned_to']]
 
@@ -1080,10 +1108,20 @@ def update_projects(request, id):
     serializer = ProjectSerializer(project, data=formatted_data, partial=(request.method in ['PATCH', 'POST']))
     if serializer.is_valid():
         project = serializer.save()
+        # Add new project links
+        for link in links:
+            if link and str(link).strip():
+                ProjectLink.objects.create(
+                    project=project,
+                    url=str(link).strip()
+                )
 
-        if "attachments" in request.FILES:
-            project.attachments = request.FILES["attachments"]
-            project.save()
+        # Add new project attachments
+        for file in request.FILES.getlist("attachments"):
+            ProjectAttachment.objects.create(
+                project=project,
+                file=file
+            )
 
         for user in project.assigned_to.all():
 
@@ -6180,7 +6218,6 @@ def update_team(request, team_id):
         )
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated, IsAdminRole])
 def delete_team(request, team_id):
@@ -6197,18 +6234,38 @@ def delete_team(request, team_id):
             status=status.HTTP_404_NOT_FOUND
         )
 
-    # Don't allow deletion if employees are assigned
+    blockers = []
+
+    # Check employees
     if team.members.exists():
+        blockers.append("employees are assigned")
+
+    # Check projects
+    if Project.objects.filter(
+        team=team,
+        company=request.user.company
+    ).exists():
+        blockers.append("projects are assigned")
+
+    # Check Team Lead
+    if team.team_lead:
+        blockers.append("a Team Lead is assigned")
+
+    # Prevent deletion if anything is linked to the team
+    if blockers:
         return Response(
             {
-                "error": "This team has employees assigned and cannot be deleted."
+                "error": (
+                    f"This team cannot be deleted because "
+                    f"{', '.join(blockers)}."
+                )
             },
             status=status.HTTP_400_BAD_REQUEST
         )
 
     team_name = team.team_name
 
-    # Delete team first
+    # Delete team
     team.delete()
 
     # In-app notification
